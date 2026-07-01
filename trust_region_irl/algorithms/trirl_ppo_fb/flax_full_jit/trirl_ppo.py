@@ -165,6 +165,8 @@ class TRIRL_PPO:
         if self.save_model:
             os.makedirs(self.save_path)
             self.latest_model_file_name = "latest.model"
+            self.best_model_file_name = "best.model"      # highest eval/episode_return so far
+            self.best_eval_return = -np.inf               # host-side tracker, updated in save callback
             self.latest_model_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
 
 
@@ -258,7 +260,12 @@ class TRIRL_PPO:
                             def energy_single(z):
                                 return disc_energy_from_z_apply(discriminator_params, z)
 
-                            score = jax.vmap(lambda z: -jax.grad(energy_single)(z))(noisy_z)
+                            # trirl_loss_fn is vmapped per-sample, so noisy_z is a single
+                            # latent vector (latent_dim,), not a batch. grad of the scalar
+                            # energy w.r.t. it already yields the (latent_dim,) score; the
+                            # original jax.vmap here iterated over the latent dim -> fed
+                            # scalars into energy_from_z -> shape[-1] IndexError.
+                            score = -jax.grad(energy_single)(noisy_z)
                             target = -(noisy_z - expert_z) / (sigma ** 2)
                             return 0.5 * jnp.mean(jnp.sum(jnp.square(score - target), axis=-1))
 
@@ -279,7 +286,7 @@ class TRIRL_PPO:
                         interpolated_abs = 0.0 * expert_absorbing # assume interpolated state to be non-absorbing
                         interpolated_feature = alpha * expert_feature + (1 - alpha) * feature                
                         grad_feature, grad_state, grad_action, grad_next_state = jax.grad(lambda f, s, a, sn, ab: jnp.sum(self.discriminator.apply(discriminator_params, f, s, a, sn, ab)), argnums=(0, 1, 2, 3))(interpolated_feature, interpolated_state, interpolated_action, interpolated_next_state, interpolated_abs)                
-                        grad_norm = jnp.sqrt(jnp.sum(jnp.square(grad_feature)))
+                        grad_norm = jnp.sqrt(jnp.sum(jnp.square(grad_feature)) + 1e-12)  # eps: sqrt(0) has inf grad -> NaN with the Boltzmann relu encoder (grad_feature can be 0)
                         gp = (grad_norm - 1.0) ** 2
 
                         # Denoising Score Matching loss to get Boltzmann features
@@ -312,23 +319,24 @@ class TRIRL_PPO:
                     batch_actions = actions.reshape((-1,) + self.as_shape)
                     batch_features = self.train_env.feature_from_transition(batch_states, batch_actions) # get features
 
-                    # Expert batch
+                    # Expert batch: sample batch_size transitions WITH REPLACEMENT so the
+                    # expert minibatch is correct even when batch_size > number of expert
+                    # transitions. (The original perm[:batch_size] returned only len(expert)
+                    # rows; the downstream arange(batch_size) indexing then clamped the
+                    # out-of-range indices to the last row, collapsing the expert batch to
+                    # ~one repeated sample whenever nr_envs*nr_steps > len(expert_data).)
                     key, shuffle_key = jax.random.split(key)
-                    perm = jax.random.permutation(shuffle_key, expert_states.shape[0])
-                    expert_states = expert_states[perm]
-                    expert_actions = expert_actions[perm]
-                    batch_expert_states = expert_states[:self.batch_size]
-                    batch_expert_actions = expert_actions[:self.batch_size]
+                    expert_idx = jax.random.randint(shuffle_key, (self.batch_size,), 0, expert_states.shape[0])
+                    batch_expert_states = expert_states[expert_idx]
+                    batch_expert_actions = expert_actions[expert_idx]
                     batch_expert_features = self.train_env.feature_from_transition(batch_expert_states, batch_expert_actions) # get features
                     expert_labels = jnp.ones((self.batch_size, 1), dtype=jnp.float32)
                     rollout_labels = jnp.zeros((self.batch_size, 1), dtype=jnp.float32)
 
                     batch_next_states = next_states.reshape((-1,) + self.os_shape)
                     batch_absorbing = terminations.reshape(-1)
-                    expert_next_states = expert_next_states[perm]
-                    expert_absorbing = expert_absorbing[perm]
-                    batch_expert_next_states = expert_next_states[:self.batch_size]
-                    batch_expert_absorbing = expert_absorbing[:self.batch_size]
+                    batch_expert_next_states = expert_next_states[expert_idx]
+                    batch_expert_absorbing = expert_absorbing[expert_idx]
 
                     vmap_trirl_loss_fn = jax.vmap(trirl_loss_fn, in_axes=(None, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), out_axes=0)
                     safe_mean = lambda x: jnp.mean(x) if x is not None else x
@@ -646,9 +654,21 @@ class TRIRL_PPO:
 
                 # Saving
                 if self.save_model:
-                    def save_with_check(policy_state, critic_state, discriminator_state, corrected_reward_state):
-                        self.save(policy_state, critic_state, discriminator_state, corrected_reward_state)
-                    jax.debug.callback(save_with_check, policy_state, critic_state, discriminator_state, corrected_reward_state)
+                    # use the deterministic eval return as the "best" criterion (higher
+                    # = closer to goal, since the env reward is -pos - 0.5*orient). Needs
+                    # evaluation_active; falls back to latest-only otherwise.
+                    eval_return_for_save = (eval_metrics["eval/episode_return"]
+                                            if self.evaluation_active else jnp.asarray(-jnp.inf))
+                    def save_with_check(policy_state, critic_state, discriminator_state, corrected_reward_state, eval_return):
+                        self.save(policy_state, critic_state, discriminator_state, corrected_reward_state)  # latest.model
+                        if self.evaluation_active:
+                            er = float(np.asarray(eval_return).reshape(-1)[0])
+                            if er > self.best_eval_return:
+                                self.best_eval_return = er
+                                self.save(policy_state, critic_state, discriminator_state, corrected_reward_state,
+                                          file_name=self.best_model_file_name)
+                                rlx_logger.info(f"[save-best] new best eval/episode_return={er:.3f} -> {self.best_model_file_name}")
+                    jax.debug.callback(save_with_check, policy_state, critic_state, discriminator_state, corrected_reward_state, eval_return_for_save)
                 
                 return (policy_state, critic_state, discriminator_state, corrected_reward_state, (expert_states, expert_actions, expert_next_states, expert_absorbing, expert_features), env_state, key), None
 
@@ -697,7 +717,8 @@ class TRIRL_PPO:
             rlx_logger.info("└" + "─" * 31 + "┴" + "─" * 16 + "┘")
 
 
-    def save(self, policy_state, critic_state, discriminator_state, corrected_reward_state):
+    def save(self, policy_state, critic_state, discriminator_state, corrected_reward_state, file_name=None):
+        file_name = file_name or self.latest_model_file_name
         checkpoint = {
             "policy": policy_state,
             "critic": critic_state,
@@ -708,12 +729,11 @@ class TRIRL_PPO:
         self.latest_model_checkpointer.save(f"{self.save_path}/tmp", checkpoint, save_args=save_args)
         with open(f"{self.save_path}/tmp/config_algorithm.json", "w") as f:
             json.dump(self.config.algorithm.to_dict(), f)
-        shutil.make_archive(f"{self.save_path}/{self.latest_model_file_name}", "zip", f"{self.save_path}/tmp")
-        # os.rename(f"{self.save_path}/{self.latest_model_file_name}.zip", f"{self.save_path}/{self.latest_model_file_name}")
+        shutil.make_archive(f"{self.save_path}/{file_name}", "zip", f"{self.save_path}/tmp")
         shutil.rmtree(f"{self.save_path}/tmp")
 
         if self.track_wandb:
-            wandb.save(f"{self.save_path}/{self.latest_model_file_name}", base_path=self.save_path)
+            wandb.save(f"{self.save_path}/{file_name}", base_path=self.save_path)
     
 
     def load(config, train_env, eval_env, run_path, writer, explicitly_set_algorithm_params):
