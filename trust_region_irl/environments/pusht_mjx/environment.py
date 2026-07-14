@@ -249,6 +249,8 @@ class PushT:
         info = {
             "rollout/episode_return": 0.0,
             "rollout/episode_length": 0,
+            "rollout/is_success": 0.0,
+            "rollout/diverged": 0.0,
             "env_info/pos_err": 0.0,
             "env_info/orient_err": 0.0,
             "env_info/is_success": 0.0,
@@ -326,6 +328,9 @@ class PushT:
         log_done = terminated | at_horizon
         state.info["rollout/episode_return"] = jnp.where(log_done, state.info_episode_store["episode_return"], state.info["rollout/episode_return"])
         state.info["rollout/episode_length"] = jnp.where(log_done, state.info_episode_store["episode_length"], state.info["rollout/episode_length"])
+        # record on episode end, before reset zeroes the env_info flags
+        state.info["rollout/is_success"] = jnp.where(done, terminated.astype(jnp.float32), state.info["rollout/is_success"])
+        state.info["rollout/diverged"] = jnp.where(done, diverged.astype(jnp.float32), state.info["rollout/diverged"])
 
         def when_done(_):
             start_state = self._reset(state)
