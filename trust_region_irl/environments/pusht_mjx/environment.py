@@ -252,8 +252,8 @@ class PushT:
             "env_info/pos_err": 0.0,
             "env_info/orient_err": 0.0,
             "env_info/is_success": 0.0,
-            "env_info/reward_dist": 0.0,
-            "env_info/reward_ctrl": 0.0,
+            "env_info/ctrl_err": 0.0,
+            "env_info/ee_block_dist": 0.0,
             "env_info/diverged": 0.0,
         }
         info_episode_store = {"episode_return": 0.0, "episode_length": 0}
@@ -274,8 +274,8 @@ class PushT:
         info["env_info/pos_err"] = 0.0
         info["env_info/orient_err"] = 0.0
         info["env_info/is_success"] = 0.0
-        info["env_info/reward_dist"] = 0.0
-        info["env_info/reward_ctrl"] = 0.0
+        info["env_info/ctrl_err"] = 0.0
+        info["env_info/ee_block_dist"] = 0.0
         info["env_info/diverged"] = 0.0
         return state.replace(
             data=data,
@@ -378,23 +378,22 @@ class PushT:
         pos_err, orn_err = self._goal_errors(data)
         is_success = ((pos_err + orn_err) < self.success_threshold).astype(jnp.float32)
 
-        reward_dist = -pos_err
-        reward_orient = -orn_err
-        reward_ctrl = -jnp.sum(jnp.square(action))
+        ctrl_err = jnp.sum(jnp.square(action))
+        ee_block = jnp.linalg.norm(data.xpos[self.ee_body_id] - data.xpos[self.block_body_id])
         if self.reward_style == "sparse":
             reward = jnp.where(is_success > 0.5, 1.0, 0.0)
         else:
-            reward = reward_dist + 0.5 * reward_orient + 0.001 * reward_ctrl
-        # explicit bounded neginf (default is ~-3.4e38) so a future reward-sign
-        # change can't reintroduce a huge-negative leak into the critic
+            # reward = negated MTP expert cost
+            reward = -(30.0 * pos_err + 3.0 * orn_err + 0.005 * ee_block)
+
         reward = jnp.nan_to_num(reward, nan=0.0, posinf=0.0, neginf=-10.0)
 
         info = {
             "env_info/pos_err": pos_err,
             "env_info/orient_err": orn_err,
+            "env_info/ctrl_err": ctrl_err,
+            "env_info/ee_block_dist": ee_block,
             "env_info/is_success": is_success,
-            "env_info/reward_dist": reward_dist,
-            "env_info/reward_ctrl": reward_ctrl,
         }
         return reward, info
 
