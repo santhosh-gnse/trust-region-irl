@@ -165,8 +165,8 @@ class TRIRL_PPO:
         if self.save_model:
             os.makedirs(self.save_path)
             self.latest_model_file_name = "latest.model"
-            self.best_model_file_name = "best.model"      # highest eval/episode_return so far
-            self.best_eval_return = -np.inf               # host-side tracker, updated in save callback
+            self.best_model_file_name = "best.model"      # lowest eval/task_err so far
+            self.best_eval_task_err = np.inf              # host-side tracker, updated in save callback
             self.latest_model_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
 
 
@@ -638,6 +638,8 @@ class TRIRL_PPO:
                     eval_metrics = {
                         "eval/episode_return": jnp.mean(eval_env_state.info["rollout/episode_return"]),
                         "eval/episode_length": jnp.mean(eval_env_state.info["rollout/episode_length"]),
+                        "eval/is_success": jnp.mean(eval_env_state.info["rollout/is_success"]),
+                        "eval/task_err": jnp.mean(eval_env_state.info["rollout/task_err"]),
                     }
 
                     def callback(metrics_and_global_step):
@@ -654,21 +656,19 @@ class TRIRL_PPO:
 
                 # Saving
                 if self.save_model:
-                    # use the deterministic eval return as the "best" criterion (higher
-                    # = closer to goal, since the env reward is -pos - 0.5*orient). Needs
-                    # evaluation_active; falls back to latest-only otherwise.
-                    eval_return_for_save = (eval_metrics["eval/episode_return"]
-                                            if self.evaluation_active else jnp.asarray(-jnp.inf))
-                    def save_with_check(policy_state, critic_state, discriminator_state, corrected_reward_state, eval_return):
+                    # best = lowest deterministic eval task error (pos+orient)
+                    eval_task_err_for_save = (eval_metrics["eval/task_err"]
+                                              if self.evaluation_active else jnp.asarray(jnp.inf))
+                    def save_with_check(policy_state, critic_state, discriminator_state, corrected_reward_state, eval_task_err):
                         self.save(policy_state, critic_state, discriminator_state, corrected_reward_state)  # latest.model
                         if self.evaluation_active:
-                            er = float(np.asarray(eval_return).reshape(-1)[0])
-                            if er > self.best_eval_return:
-                                self.best_eval_return = er
+                            te = float(np.asarray(eval_task_err).reshape(-1)[0])
+                            if te < self.best_eval_task_err:
+                                self.best_eval_task_err = te
                                 self.save(policy_state, critic_state, discriminator_state, corrected_reward_state,
                                           file_name=self.best_model_file_name)
-                                rlx_logger.info(f"[save-best] new best eval/episode_return={er:.3f} -> {self.best_model_file_name}")
-                    jax.debug.callback(save_with_check, policy_state, critic_state, discriminator_state, corrected_reward_state, eval_return_for_save)
+                                rlx_logger.info(f"[save-best] new best eval/task_err={te:.4f} -> {self.best_model_file_name}")
+                    jax.debug.callback(save_with_check, policy_state, critic_state, discriminator_state, corrected_reward_state, eval_task_err_for_save)
                 
                 return (policy_state, critic_state, discriminator_state, corrected_reward_state, (expert_states, expert_actions, expert_next_states, expert_absorbing, expert_features), env_state, key), None
 

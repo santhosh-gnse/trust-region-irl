@@ -251,9 +251,10 @@ class PushT:
             "rollout/episode_length": 0,
             "rollout/is_success": 0.0,
             "rollout/diverged": 0.0,
+            "rollout/task_err": 0.0,
             "env_info/pos_err": 0.0,
             "env_info/orient_err": 0.0,
-            "env_info/is_success": 0.0,
+            "env_info/task_err": 0.0,
             "env_info/ctrl_err": 0.0,
             "env_info/ee_block_dist": 0.0,
             "env_info/diverged": 0.0,
@@ -275,7 +276,7 @@ class PushT:
         info = dict(state.info)
         info["env_info/pos_err"] = 0.0
         info["env_info/orient_err"] = 0.0
-        info["env_info/is_success"] = 0.0
+        info["env_info/task_err"] = 0.0
         info["env_info/ctrl_err"] = 0.0
         info["env_info/ee_block_dist"] = 0.0
         info["env_info/diverged"] = 0.0
@@ -307,7 +308,7 @@ class PushT:
         state.info_episode_store["episode_length"] += 1
         next_observation = self.get_observation(data)
         reward, r_info = self.get_reward(data, action)
-        terminated = r_info["env_info/is_success"] > 0.5
+        terminated = r_info["env_info/task_err"] < self.success_threshold
         # divergence guard: block left a sane region (huge-finite) or state went
         # NaN -> end the episode so it resets instead of accumulating garbage.
         # (NaN > bound is False, so explicit isnan checks are needed; qvel/xpos can
@@ -331,6 +332,7 @@ class PushT:
         # record on episode end, before reset zeroes the env_info flags
         state.info["rollout/is_success"] = jnp.where(done, terminated.astype(jnp.float32), state.info["rollout/is_success"])
         state.info["rollout/diverged"] = jnp.where(done, diverged.astype(jnp.float32), state.info["rollout/diverged"])
+        state.info["rollout/task_err"] = jnp.where(done, r_info["env_info/task_err"], state.info["rollout/task_err"])
 
         def when_done(_):
             start_state = self._reset(state)
@@ -382,6 +384,7 @@ class PushT:
     def get_reward(self, data, action):
         pos_err, orn_err = self._goal_errors(data)
         is_success = ((pos_err + orn_err) < self.success_threshold).astype(jnp.float32)
+        task_err = pos_err + orn_err
 
         ctrl_err = jnp.sum(jnp.square(action))
         ee_block = jnp.linalg.norm(data.xpos[self.ee_body_id] - data.xpos[self.block_body_id])
@@ -396,9 +399,9 @@ class PushT:
         info = {
             "env_info/pos_err": pos_err,
             "env_info/orient_err": orn_err,
+            "env_info/task_err": task_err,
             "env_info/ctrl_err": ctrl_err,
             "env_info/ee_block_dist": ee_block,
-            "env_info/is_success": is_success,
         }
         return reward, info
 
