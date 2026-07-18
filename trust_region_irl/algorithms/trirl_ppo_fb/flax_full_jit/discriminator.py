@@ -1,4 +1,5 @@
 import numpy as np
+from typing import Sequence
 import flax.linen as nn
 import jax.numpy as jnp
 from flax.linen.initializers import constant, orthogonal
@@ -30,7 +31,12 @@ def get_discriminator(config, env, reward_type='feature-based'):
         if reward_type == 'feature-based':
             return DiscriminatorFeatureBased()
         elif reward_type == 'boltzmann-feature-based':
-            return BoltzmannDiscriminatorFeatureBased()
+            hidden_dims = tuple(int(x) for x in str(config.algorithm.boltzmann_hidden_dims).split(",") if x.strip() != "")
+            return BoltzmannDiscriminatorFeatureBased(
+                hidden_dims=hidden_dims,
+                latent_dim=int(config.algorithm.boltzmann_latent_dim),
+                energy_hidden_dim=int(config.algorithm.boltzmann_energy_hidden_dim),
+            )
         elif reward_type == 'shapedboltzmann-feature-based':
             raise NotImplementedError
         else:
@@ -50,27 +56,33 @@ class DiscriminatorFeatureBased(nn.Module):
 
 
 class BoltzmannDiscriminatorFeatureBased(nn.Module):
+    # architecture is configurable (see default_config.py boltzmann_* fields)
+    hidden_dims: Sequence[int] = (4, 8)   # encoder hidden layer widths
+    latent_dim: int = 16                  # encoder output dim (= reward theta dim)
+    energy_hidden_dim: int = 32           # energy head hidden width
+
     def setup(self):
-        # TODO: currently hard coded!
-        hidden1 = 4
-        hidden2 = 8
-        latent_dim = 16
+        # Layer names kept as feat_dense1..N (last = output) so the DEFAULT (4,8)/16 arch is
+        # byte-identical to the old hard-coded module and old checkpoints still load.
+        dims = list(self.hidden_dims) + [self.latent_dim]
+        layers = []
+        for i, d in enumerate(dims):
+            is_out = (i == len(dims) - 1)
+            layers.append(nn.Dense(d, kernel_init=orthogonal(1.0 if is_out else jnp.sqrt(2)),
+                                   bias_init=constant(0.0), name=f"feat_dense{i+1}"))
+        self.feat_layers = layers
 
-        self.feat_dense1 = nn.Dense(hidden1, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0))
-        self.feat_dense2 = nn.Dense(hidden2, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0))
-        self.feat_dense3 = nn.Dense(latent_dim, kernel_init=orthogonal(1.0), bias_init=constant(0.0))
+        self.theta = self.param("theta", constant(0.0), (self.latent_dim,))
 
-        self.theta = self.param("theta", constant(0.0), (latent_dim,))
-
-        self.energy_dense1 = nn.Dense(32, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0))
+        self.energy_dense1 = nn.Dense(self.energy_hidden_dim, kernel_init=orthogonal(jnp.sqrt(2)), bias_init=constant(0.0))
         self.energy_dense2 = nn.Dense(1, kernel_init=orthogonal(1.0), bias_init=constant(0.0))
 
     def encode_feature(self, f):
-        z = self.feat_dense1(f)
-        z = nn.relu(z)
-        z = self.feat_dense2(z)
-        z = nn.relu(z)
-        z = self.feat_dense3(z)
+        z = f
+        for i, layer in enumerate(self.feat_layers):
+            z = layer(z)
+            if i < len(self.feat_layers) - 1:   # relu on hidden layers only, not the output
+                z = nn.relu(z)
         return z
 
     def energy_from_z(self, z):
