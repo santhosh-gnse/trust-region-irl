@@ -155,6 +155,8 @@ class PushT:
             feature_dim = 4  # [-pos_err, -orient_err, -ee_block_dist, -ctrl]
         elif self.feature_fn == "base_rbf":
             feature_dim = 7  # [-pos_err, -orient_err, -ee_block, pos_bump_tight, pos_bump_wide, ori_bump, goal_bump]
+        elif self.feature_fn == "rbf":
+            feature_dim = 4  # [pos_bump_tight, pos_bump_wide, ori_bump, goal_bump] (RBF bumps only)
         else:
             feature_dim = self.single_observation_space.shape[0]
         self.single_features_shape = BoxSpace(
@@ -443,6 +445,18 @@ class PushT:
             goal_bump = jnp.exp(-(((pos_err + orient_err)) / 0.10) ** 2)  # smooth success proxy
             features = jnp.stack([-pos_err, -orient_err, -ee_block,
                                   pos_bump_tight, pos_bump_wide, ori_bump, goal_bump], axis=-1)
+        elif self.feature_fn == "rbf":
+            # RBF bumps only: the goal-centered Gaussians from base_rbf, WITHOUT the base
+            # error terms concatenated (base_rbf = base errors + these bumps).
+            block_pos = observation[:, 0:3]
+            w = observation[:, 3]
+            pos_err = jnp.linalg.norm(block_pos, axis=-1)
+            orient_err = 1.0 - jnp.clip(w * w, 0.0, 1.0)
+            pos_bump_tight = jnp.exp(-(pos_err / 0.04) ** 2)
+            pos_bump_wide = jnp.exp(-(pos_err / 0.12) ** 2)
+            ori_bump = jnp.exp(-(orient_err / 0.15) ** 2)
+            goal_bump = jnp.exp(-(((pos_err + orient_err)) / 0.10) ** 2)
+            features = jnp.stack([pos_bump_tight, pos_bump_wide, ori_bump, goal_bump], axis=-1)
         elif self.feature_fn == "state_action":
             features = jnp.concatenate([observation, action], axis=-1)
         elif self.feature_fn == "base":

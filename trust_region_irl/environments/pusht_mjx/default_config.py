@@ -11,6 +11,6 @@ def get_config(environment_name):
     config.render = False
     config.device = "gpu"
     config.copy_train_env_for_eval = True
-    config.feature_fn = "base"  # IRL feature basis: base | base_rbf | state_action
+    config.feature_fn = "base"  # IRL feature basis: base | base_rbf | rbf | state_action
 
     return config
