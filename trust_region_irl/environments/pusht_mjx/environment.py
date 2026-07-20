@@ -94,13 +94,20 @@ class PushT:
                           # (~0.57 m table; 1.0 catches off-table blocks early)
 
     def __init__(self, render, horizon=250, reward_style="dense",
-                 success_threshold=0.05, feature_fn="base"):
+                 success_threshold=0.05, feature_fn="base", block_type="free"):
         self.horizon = horizon
         self.reward_style = reward_style
         self.success_threshold = success_threshold
         self.feature_fn = feature_fn
+        self.block_type = block_type
 
-        xml_path = (Path(__file__).resolve().parent / "data" / "scene_mjx_free.xml").as_posix()
+        # block physics: free (6-DOF free joint) or 3dof (planar slide/slide/hinge, matches
+        # the 3dof MTP data collection). Only the scene + initial block qpos differ; obs,
+        # reward, IK, and reset all read body kinematics so they are layout-agnostic.
+        _scene = {"free": "scene_mjx_free.xml", "3dof": "scene_mjx_joint.xml"}
+        if block_type not in _scene:
+            raise ValueError(f"block_type must be 'free' or '3dof', got {block_type!r}")
+        xml_path = (Path(__file__).resolve().parent / "data" / _scene[block_type]).as_posix()
         self.mj_model = mujoco.MjModel.from_xml_path(xml_path)
         self.mj_model.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
         self.mj_data = mujoco.MjData(self.mj_model)
@@ -181,12 +188,25 @@ class PushT:
         state matches the expert dataset exactly.
         """
         m, d = self.mj_model, mujoco.MjData(self.mj_model)
-        # fixed block pose (free joint qpos[0:7])
-        d.qpos[0] = self.BLOCK_POS[0]
-        d.qpos[1] = self.BLOCK_POS[1]
-        d.qpos[2] = 0.045
-        half = self.BLOCK_ANGLE * 0.5
-        d.qpos[3:7] = np.array([np.cos(half), 0.0, 0.0, np.sin(half)])  # wxyz, z-rot
+        if self.block_type == "3dof":
+            # planar block: slide-x, slide-y, hinge-yaw at qpos[0:3]. Slide qpos are
+            # displacements from rest and the hinge is offset from the body origin, so set
+            # the yaw first, then solve the slides via FK to land the block at the fixed
+            # world start (reproduces the 3dof data generator's placement).
+            d.qpos[2] = self.BLOCK_ANGLE
+            d.qpos[0] = 0.0
+            d.qpos[1] = 0.0
+            mujoco.mj_forward(m, d)
+            rest_xy = d.xpos[self.block_body_id][:2].copy()
+            d.qpos[0] = self.BLOCK_POS[0] - rest_xy[0]
+            d.qpos[1] = self.BLOCK_POS[1] - rest_xy[1]
+        else:
+            # free joint: qpos[0:7] = block pos + quat
+            d.qpos[0] = self.BLOCK_POS[0]
+            d.qpos[1] = self.BLOCK_POS[1]
+            d.qpos[2] = 0.045
+            half = self.BLOCK_ANGLE * 0.5
+            d.qpos[3:7] = np.array([np.cos(half), 0.0, 0.0, np.sin(half)])  # wxyz, z-rot
 
         q = np.array([0.0, -np.pi / 4, 0.0, -9 * np.pi / 10, 0.0, 3 * np.pi / 4, np.pi / 4])
         goal_quat_ee = np.array(self.GOAL_QUAT_EE)
