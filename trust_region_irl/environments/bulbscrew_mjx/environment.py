@@ -211,7 +211,8 @@ class BulbScrew:
         elif self.feature_fn == "base":
             feature_dim = 5  # [-d_seat, -upright_err, -d_ee_grasp, width, -ctrl]
         elif self.feature_fn == "base_rbf":
-            feature_dim = 8  # base3 + width + seat_tight, seat_wide, up_bump, grasp_bump
+            feature_dim = 9  # all of base (incl. -ctrl) + seat_tight, seat_wide,
+                             # up_bump, grasp_bump
         elif self.feature_fn == "base_screw":
             feature_dim = 10  # -d_xy, -|depth|, -upright_err, -d_ee_grasp, width,
                               # screw_rate, -ctrl, align_bump, seated_bump, grasp_bump
@@ -531,12 +532,15 @@ class BulbScrew:
 
         if self.feature_fn == "base_rbf":
             # peaked goal-centered bumps: matching the expert requires actually
-            # seating the bulb, not matching an average distance (pushT lesson)
+            # seating the bulb, not matching an average distance (pushT lesson).
+            # Strict SUPERSET of `base` -- it carries base's -ctrl term too, so it
+            # cannot be worse than base at anything.
             seat_tight = jnp.exp(-(d_seat / 0.02) ** 2)
             seat_wide = jnp.exp(-(d_seat / 0.08) ** 2)
             up_bump = jnp.exp(-(upright_err / 0.10) ** 2)
             grasp_bump = jnp.exp(-(d_ee_neck / 0.05) ** 2)
-            features = jnp.stack([-d_seat, -upright_err, -d_ee_neck, width,
+            ctrl = jnp.sum(jnp.square(action), axis=-1)
+            features = jnp.stack([-d_seat, -upright_err, -d_ee_neck, width, -ctrl,
                                   seat_tight, seat_wide, up_bump, grasp_bump], axis=-1)
         elif self.feature_fn == "base_screw":
             # Splits d_seat into the two axes the task actually progresses along
