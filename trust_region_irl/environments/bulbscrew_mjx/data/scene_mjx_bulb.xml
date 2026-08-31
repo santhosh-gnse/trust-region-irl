@@ -8,9 +8,13 @@
        100/50 down to 4/6 gave identical results (free-standing drift 1.79 mm,
        tilt 0.0 deg, grip slip 26.8 mm at every setting), so 7/10 -- pushT's
        values -- is safe. Raise these if insertion contact ever looks unstable.
-       timestep stays 0.01 (5 substeps at 20 Hz): the small step is what keeps
-       the threading contact stable. -->
-  <option timestep="0.01" iterations="7" ls_iterations="10"/>
+       timestep is 0.0125 -> 4 substeps at 20 Hz. Swept 0.01/0.0125/0.0167/0.025
+       against insertion from four approach speeds and offsets: 0.01 and 0.0125
+       seat identically every time (51.78 / 51.67 mm), 0.0167 FAILS at slow
+       approach (38.15 mm -- stops 14 mm short, exactly what a careful policy
+       would do), and 0.025 fails outright (37.9 mm seat, 17.5 mm penetration,
+       123 mm grip slip). So the hoped-for 2.5x is not available; 1.25x is. -->
+  <option timestep="0.0125" iterations="7" ls_iterations="10"/>
 
   <asset>
     <texture type="skybox" builtin="gradient" rgb1="0.2 0.25 0.35" rgb2="0.05 0.07 0.1" width="64" height="64"/>
