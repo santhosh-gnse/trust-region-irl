@@ -26,6 +26,7 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 DT = 0.05
 DEPTH, HOLD_S = 0.003, 1.0          # bulbscrew_mjx DEPTH_SOLVED / HOLD_SECONDS
+HORIZON = 800                       # bulbscrew_mjx BulbScrew horizon default
 
 
 def first_screwed(d_seat, thr=DEPTH, hold=HOLD_S, dt=DT):
@@ -80,7 +81,7 @@ def main():
     print("-" * 72)
     print(f"{len(lens)} episodes, {lens.sum()} transitions ({lens.sum()*DT:.0f} s at 20 Hz)")
     print(f"lengths: min {lens.min()} median {int(np.median(lens))} max {lens.max()} "
-          f"(sim horizon 1000)")
+          f"(sim horizon {HORIZON})")
     kept = 100 * lens.sum() / sum(len(np.load(p)['states']) for p in eps)
     print(f"kept {kept:.0f}% of the recorded transitions; {len(dropped)} episode(s) dropped")
     print(f"-> {args.out}")

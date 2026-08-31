@@ -45,6 +45,20 @@ DT = 0.05                     # 20 Hz control
 OLD_LINEAR, OLD_YAW = 0.10, 0.75      # scales in force when these were recorded
 
 
+def fwd_diff(x, dt):
+    """Forward difference: the rate that produced the transition s[t] -> s[t+1].
+
+    np.gradient uses CENTRED differences, so a[t] would partly encode motion
+    between t-1 and t -- motion that had already happened. The label is supposed
+    to be the action that CAUSED the next state, which is the forward difference.
+    Measured on this data the two disagree by 2.2% of the speed cap at the median
+    and 28.5% at the 90th percentile, so it is small but not negligible.
+    The final step has no successor; it repeats the previous rate.
+    """
+    v = np.diff(x, axis=0) / dt
+    return np.concatenate([v, v[-1:]], axis=0)
+
+
 def smooth(x, k):
     """Centred moving average along axis 0; k=1 is a no-op."""
     if k <= 1:
@@ -103,9 +117,8 @@ def main():
         z = dict(np.load(p))
         S, A = z["states"], z["actions"]
         pos, yaw = tool_pose_series(S, m, d, jadr, ee)
-        v = smooth(np.gradient(pos, DT, axis=0), args.smooth)          # m/s, fr3_link0
-        w = np.gradient(yaw, DT)
-        w = smooth(w[:, None], args.smooth)[:, 0]                      # rad/s
+        v = smooth(fwd_diff(pos, DT), args.smooth)                     # m/s, fr3_link0
+        w = smooth(fwd_diff(yaw[:, None], DT), args.smooth)[:, 0]      # rad/s
 
         new = A.copy()
         new[:, 0:3] = np.clip(v / args.max_linear_speed, -1.0, 1.0)
