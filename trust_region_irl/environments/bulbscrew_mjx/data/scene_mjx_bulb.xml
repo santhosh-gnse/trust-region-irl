@@ -1,7 +1,16 @@
 <mujoco model="fr3 bulbscrew scene">
   <include file="fr3_vel_mjx_hand.xml"/>
 
-  <option timestep="0.01"/>
+  <!-- Solver iterations are CAPPED, matching pusht_mjx's scene. Without these
+       the model inherits MuJoCo's defaults (100 Newton / 50 line-search), and
+       because MJX runs a FIXED iteration count with no early exit, that is pure
+       overhead: measured ~2.8x slower with no change in behaviour. A sweep from
+       100/50 down to 4/6 gave identical results (free-standing drift 1.79 mm,
+       tilt 0.0 deg, grip slip 26.8 mm at every setting), so 7/10 -- pushT's
+       values -- is safe. Raise these if insertion contact ever looks unstable.
+       timestep stays 0.01 (5 substeps at 20 Hz): the small step is what keeps
+       the threading contact stable. -->
+  <option timestep="0.01" iterations="7" ls_iterations="10"/>
 
   <asset>
     <texture type="skybox" builtin="gradient" rgb1="0.2 0.25 0.35" rgb2="0.05 0.07 0.1" width="64" height="64"/>
