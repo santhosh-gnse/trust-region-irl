@@ -394,15 +394,20 @@
     <default class="hand_finger">
       <joint type="slide" axis="0 1 0" range="0 0.04" armature="0.1" damping="10"/>
     </default>
-    <!-- fingertip pads: the only contact geoms of the gripper (boxes; cheap in MJX) -->
+    <!-- Fingertip pads: the only contact geoms of the gripper. condim=3 is
+         deliberate: torsional/rolling friction (condim 6) was measured to make no
+         difference to whether the bulb turns with the wrist (it follows at ~107%
+         either way, because rotating a pinched sphere needs tangential sliding
+         that ordinary friction already resists), while costing 2.2x in the MJX
+         constraint Jacobian -- efc rows 1660 vs 760. -->
     <default class="hand_pad">
       <geom type="box" size="0.0095 0.004 0.012" contype="1" conaffinity="1"
-            friction="1.5 0.2 0.01" solref="0.01 1.0" solimp="0.9 0.95 0.001" condim="6"
+            friction="1.5" solref="0.01 1.0" solimp="0.9 0.95 0.001" condim="3"
             rgba="0.3 0.3 0.35 1"/>
     </default>
     <default class="hand_pad_tip">
       <geom type="box" size="0.007 0.0025 0.004" contype="1" conaffinity="1"
-            friction="1.5 0.2 0.01" solref="0.01 1.0" solimp="0.9 0.95 0.001" condim="6"
+            friction="1.5" solref="0.01 1.0" solimp="0.9 0.95 0.001" condim="3"
             rgba="0.3 0.3 0.35 1"/>
     </default>
   </default>
