@@ -1,0 +1,87 @@
+<mujoco model="fr3 bulbscrew scene">
+  <include file="fr3_vel_mjx_hand.xml"/>
+
+  <option timestep="0.01"/>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.2 0.25 0.35" rgb2="0.05 0.07 0.1" width="64" height="64"/>
+    <texture name="floor_tex" type="2d" builtin="checker" rgb1="0.18 0.25 0.32" rgb2="0.12 0.17 0.23" width="64" height="64"/>
+    <material name="floor_mat" texture="floor_tex" texrepeat="8 8"/>
+    <material name="board_mat" rgba="0.29 0.22 0.17 1"/>
+    <material name="socket_mat" rgba="0.85 0.85 0.82 1"/>
+    <material name="bulb_mat" rgba="0.72 0.85 0.92 0.35" specular="0.9" shininess="0.9"/>
+    <mesh file="lamp_bulb.obj"/>
+    <mesh file="lamp_base.obj"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0.5 0 1.5" dir="0 0 -1" diffuse="0.9 0.9 0.9" specular="0.3 0.3 0.3"/>
+    <light pos="1.2 0.8 1.0" dir="-0.6 -0.6 -0.7" diffuse="0.4 0.4 0.4"/>
+    <geom name="floor" type="plane" size="3 3 0.1" material="floor_mat" contype="1" conaffinity="1"/>
+
+    <!-- work board -->
+    <!-- work surface. Top measured 2026-08-30 at z = 0.0389 (touched directly
+         with the closed gripper, FK only, no mocap) -> centre = 0.0389 - 0.009.
+         The real plank's FOOTPRINT has not been surveyed; the extent here is
+         sized to contain the task (bulb x 0.744, seat x 0.599, y -0.162..0.097),
+         not measured. SIM_CHANGES.md 3. -->
+    <geom name="board" type="box" size="0.20 0.20 0.009" pos="0.675 -0.03 0.0299" material="board_mat"
+          contype="1" conaffinity="1" friction="0.8 0.01 0.0005"/>
+
+    <!-- socket (lamp_base): fixed. visual mesh + primitive cavity for insertion -->
+    <!-- Seat re-derived 2026-08-30 with the bulb screwed FULLY HOME (482 mocap
+         samples, 0.01-0.11 mm jitter): [0.5993, 0.0972, 0.0672] in fr3_link0,
+         28.3 mm above the plank. SEAT_OFF adds 0.018 in z, so the body sits
+         0.018 below the seat. Independent cross-check from the grasp arithmetic
+         (forward kinematics only) gave z = 0.0711 -- 3.9 mm apart, two chains
+         sharing nothing. SIM_CHANGES.md 3. -->
+    <body name="socket" pos="0.5993 0.0972 0.0492">
+      <geom type="mesh" mesh="lamp_base" quat="0.7071068 0.7071068 0 0" pos="0 0 0.0458"
+            material="socket_mat" contype="0" conaffinity="0" group="2"/>
+      <!-- base disk -->
+      <geom name="socket_disk" type="box" size="0.0479 0.0479 0.008" pos="0 0 0.008"
+            contype="1" conaffinity="1" rgba="0.8 0.8 0.78 0.35"/>
+      <!-- cavity walls: 4 boxes around the screw hole -->
+      <geom name="cav_xp" type="box" size="0.010 0.0262 0.025"
+            pos="0.0262 0 0.0410" contype="1" conaffinity="1" rgba="0.8 0.8 0.78 0.35"/>
+      <geom name="cav_xn" type="box" size="0.010 0.0262 0.025"
+            pos="-0.0262 0 0.0410" contype="1" conaffinity="1" rgba="0.8 0.8 0.78 0.35"/>
+      <geom name="cav_yp" type="box" size="0.0262 0.010 0.025"
+            pos="0 0.0262 0.0410" contype="1" conaffinity="1" rgba="0.8 0.8 0.78 0.35"/>
+      <geom name="cav_yn" type="box" size="0.0262 0.010 0.025"
+            pos="0 -0.0262 0.0410" contype="1" conaffinity="1" rgba="0.8 0.8 0.78 0.35"/>
+      <!-- seat site: where the screw tip must arrive -->
+      <site name="socket_seat" pos="0 0 0.018" size="0.005" rgba="1 0 0 0.5" group="4"/>
+    </body>
+
+    <!-- No bulb holder on the real rig: the bulb stands free on its screw base
+         (SIM_ALIGNMENT.md 2.2). The former holder body was removed here; the
+         bulb's flat tip geom is widened to the screw-base diameter so it is
+         stable standing on the plank. -->
+    <!-- Measured free-standing start 2026-08-30: the screw TIP sits at
+         [0.744, -0.162, 0.038] (0.7 mm off the measured plank). Hand-placed each
+         episode, so this VARIES -- the spread is not yet measured and the spawn
+         should be randomised once it is (SIM_CHANGES.md 5).
+         Body origin = tip - axis_z*TIP_OFF = 0.038 + 0.053 = 0.091. -->
+    <body name="bulb" pos="0.744 -0.162 0.0910">
+      <freejoint name="bulb_joint"/>
+      <geom type="mesh" mesh="lamp_bulb" quat="0.7071068 0.7071068 0 0" material="bulb_mat"
+            contype="0" conaffinity="0" group="2"/>
+      <!-- head sphere (grasped part) -->
+      <geom group="3" name="bulb_head" type="sphere" size="0.0300" pos="0 0 0.0410"
+            contype="1" conaffinity="1" friction="1.2 0.1 0.005" condim="6" mass="0.05"
+            rgba="0.95 0.93 0.85 0.3"/>
+      <!-- screw cylinder (inserted part) -->
+      <geom group="3" name="bulb_screw" type="capsule" size="0.0104 0.0046" pos="0 0 -0.0380"
+            contype="1" conaffinity="1" friction="0.6 0.01 0.0005" mass="0.01"
+            rgba="0.7 0.7 0.6 0.3"/>
+      <geom group="3" name="bulb_tip_flat" type="box" size="0.0105 0.0105 0.002" pos="0 0 -0.0520"
+            contype="1" conaffinity="1" friction="0.8 0.01 0.0005" mass="0.003"
+            rgba="0.6 0.6 0.5 0.4"/>
+      <geom group="3" name="bulb_neck" type="capsule" size="0.012 0.005" pos="0 0 -0.006"
+            contype="1" conaffinity="1" friction="1.5 0.2 0.01" condim="6" mass="0.005"
+            rgba="0.8 0.8 0.7 0.3"/>
+      <site name="bulb_tip" pos="0 0 -0.0530" size="0.004" rgba="0 1 1 0.5" group="4"/>
+    </body>
+  </worldbody>
+</mujoco>
