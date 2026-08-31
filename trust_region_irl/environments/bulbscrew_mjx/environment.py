@@ -134,15 +134,15 @@ class BulbScrew:
     MOUTH_DEPTH = 0.010        # m; tip below this above the seat = in the mouth
                                # (the real bulb rests 5.6 mm proud before screwing)
 
-    def __init__(self, render, horizon=1000, reward_style="dense",
+    def __init__(self, render, horizon=800, reward_style="dense",
                  success_threshold=DEPTH_SOLVED, feature_fn="base"):
-        # Generous by choice: in sim the horizon only decides when an episode
-        # resets, not how many env steps an iteration consumes, so there is no
-        # compute penalty and no hardware risk in leaving headroom. Real episodes
-        # run 464-809 steps full length and reach 'screwed home' at 344-599, so
-        # 1000 clears the longest comfortably. Truncation at the horizon
-        # bootstraps (it is not `terminated`), so a long horizon adds no bias --
-        # the cost is only that a bad early policy wanders longer before reset.
+        # Sized from the expert episodes truncated at screwed-home: 364 steps at
+        # the fastest, 463 median, 619 slowest. 800 is 1.29x the slowest expert
+        # and 1.73x the median, so a policy can be ~73% slower than a typical
+        # demonstration -- room to fumble and re-approach -- and still finish.
+        # Shorter starts cutting off near-successes; longer mostly lets a bad
+        # early policy wander before reset. Truncation at the horizon bootstraps
+        # (it is not `terminated`), so this adds no bias either way.
         self.horizon = horizon
         self.reward_style = reward_style
         self.success_threshold = success_threshold      # depth, metres
