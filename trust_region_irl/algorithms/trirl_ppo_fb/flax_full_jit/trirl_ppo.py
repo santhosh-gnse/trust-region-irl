@@ -638,9 +638,12 @@ class TRIRL_PPO:
                     eval_metrics = {
                         "eval/episode_return": jnp.mean(eval_env_state.info["rollout/episode_return"]),
                         "eval/episode_length": jnp.mean(eval_env_state.info["rollout/episode_length"]),
-                        "eval/is_success": jnp.mean(eval_env_state.info["rollout/is_success"]),
-                        "eval/task_err": jnp.mean(eval_env_state.info["rollout/task_err"]),
                     }
+                    # pushT-specific rollout stats; other envs don't populate these
+                    if "rollout/is_success" in eval_env_state.info:
+                        eval_metrics["eval/is_success"] = jnp.mean(eval_env_state.info["rollout/is_success"])
+                    if "rollout/task_err" in eval_env_state.info:
+                        eval_metrics["eval/task_err"] = jnp.mean(eval_env_state.info["rollout/task_err"])
 
                     def callback(metrics_and_global_step):
                         metrics, combined_learning_iteration_step = metrics_and_global_step
@@ -657,7 +660,7 @@ class TRIRL_PPO:
                 # Saving
                 if self.save_model:
                     # best = lowest deterministic eval task error (pos+orient)
-                    eval_task_err_for_save = (eval_metrics["eval/task_err"]
+                    eval_task_err_for_save = (eval_metrics.get("eval/task_err", jnp.asarray(jnp.inf))
                                               if self.evaluation_active else jnp.asarray(jnp.inf))
                     def save_with_check(policy_state, critic_state, discriminator_state, corrected_reward_state, eval_task_err):
                         self.save(policy_state, critic_state, discriminator_state, corrected_reward_state)  # latest.model
@@ -925,7 +928,7 @@ class TRIRL_PPO:
                 next_states=exp_next_states, absorbing=exp_absorbing, rewards=exp_rewards)
 
 
-        visualise()
+        visualize()
 
     def general_properties():
         return GeneralProperties
