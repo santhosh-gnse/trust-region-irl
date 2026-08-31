@@ -213,8 +213,8 @@ class BulbScrew:
         elif self.feature_fn == "base_rbf":
             feature_dim = 8  # base3 + width + seat_tight, seat_wide, up_bump, grasp_bump
         elif self.feature_fn == "base_screw":
-            feature_dim = 8  # -d_xy, -|depth|, -d_ee_grasp, width, screw_rate,
-                             # align_bump, seated_bump, grasp_bump
+            feature_dim = 10  # -d_xy, -|depth|, -upright_err, -d_ee_grasp, width,
+                              # screw_rate, -ctrl, align_bump, seated_bump, grasp_bump
         else:
             feature_dim = self.single_observation_space.shape[0]
         self.single_features_shape = BoxSpace(
@@ -559,7 +559,15 @@ class BulbScrew:
             align_bump = jnp.exp(-(d_xy / self.XY_TOL) ** 2)
             seated_bump = jnp.exp(-(depth / self.DEPTH_SOLVED) ** 2)
             grasp_bump = jnp.exp(-(d_ee_neck / 0.05) ** 2)
-            features = jnp.stack([-d_xy, -depth, -d_ee_neck, width, screw_rate,
+            # upright_err and ctrl are NOT optional. Without upright_err a bulb
+            # tilted 45 deg is indistinguishable from an upright one, so the
+            # reward would pay a policy for carrying a tilted bulb that cannot be
+            # inserted -- and the env's own fall check is built on this very
+            # quantity. Without ctrl nothing prefers a controlled motion to
+            # full-throttle thrashing.
+            ctrl = jnp.sum(jnp.square(action), axis=-1)
+            features = jnp.stack([-d_xy, -depth, -upright_err, -d_ee_neck, width,
+                                  screw_rate, -ctrl,
                                   align_bump, seated_bump, grasp_bump], axis=-1)
         elif self.feature_fn == "state_action":
             features = jnp.concatenate([observation, action], axis=-1)
