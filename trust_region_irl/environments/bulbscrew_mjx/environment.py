@@ -138,11 +138,11 @@ class BulbScrew:
                  success_threshold=DEPTH_SOLVED, feature_fn="base"):
         # Sized from the expert episodes truncated at screwed-home: 364 steps at
         # the fastest, 463 median, 619 slowest. 800 is 1.29x the slowest expert
-        # and 1.73x the median, so a policy can be ~73% slower than a typical
-        # demonstration -- room to fumble and re-approach -- and still finish.
-        # Shorter starts cutting off near-successes; longer mostly lets a bad
-        # early policy wander before reset. Truncation at the horizon bootstraps
-        # (it is not `terminated`), so this adds no bias either way.
+        # and 1.73x the median, so a policy can be ~73% slower than the median
+        # demonstration -- room for fumbling and re-approaching -- and still
+        # finish. Shorter than that starts cutting off near-successes; longer
+        # mostly just lets a bad early policy wander before reset. Truncation at
+        # the horizon bootstraps (it is not `terminated`), so this adds no bias.
         self.horizon = horizon
         self.reward_style = reward_style
         self.success_threshold = success_threshold      # depth, metres
@@ -171,6 +171,14 @@ class BulbScrew:
         finger_ids = [self.mj_model.joint(n).id for n in FINGER_JOINT_NAMES]
         self.finger_qadr = jnp.array(self.mj_model.jnt_qposadr[finger_ids])
         self.bulb_qadr = int(self.mj_model.joint("bulb_joint").qposadr[0])
+        # geom ids for grasp detection: a real grasp is a TWO-SIDED pinch, i.e.
+        # contact between the bulb and BOTH fingertips. Touching with one pad is
+        # pushing, not holding.
+        gid = lambda n: self.mj_model.geom(n).id
+        self.left_pad_ids = jnp.array([gid("left_pad_big"), gid("left_pad_tip")])
+        self.right_pad_ids = jnp.array([gid("right_pad_big"), gid("right_pad_tip")])
+        self.bulb_geom_ids = jnp.array([gid(n) for n in
+            ("bulb_head", "bulb_screw", "bulb_tip_flat", "bulb_neck")])
         # velocity-actuator limits (first 7 ctrl entries are the arm)
         self.joint_vel_limits = jnp.array(self.mj_model.actuator_ctrlrange[:7, 1])
 
@@ -270,12 +278,15 @@ class BulbScrew:
             "rollout/spin_turns": 0.0,
             "rollout/depth": 0.0,
             "rollout/fallen": 0.0,
+            "rollout/grasped": 0.0,
+            "rollout/grasp_frac": 0.0,
             "env_info/d_seat": 0.0,
             "env_info/d_xy": 0.0,
             "env_info/depth": 0.0,
             "env_info/reached_socket": 0.0,
             "env_info/spin_turns": 0.0,
             "env_info/fallen": 0.0,
+            "env_info/grasped": 0.0,
             "env_info/upright_err": 0.0,
             "env_info/d_ee_neck": 0.0,
             "env_info/grip_width": 0.0,
@@ -286,7 +297,8 @@ class BulbScrew:
         info_episode_store = {"episode_return": 0.0, "episode_length": 0,
                               "steps_at_depth": 0, "prev_yaw": 0.0,
                               "spin_total": 0.0, "reached_socket": 0.0,
-                              "steps_tilted": 0}
+                              "steps_tilted": 0, "grasped_ever": 0.0,
+                              "grasped_steps": 0.0}
         state = State(data, next_observation, next_observation, 0.0, False, False,
                       info, info_episode_store, key)
         return self._reset(state)
@@ -304,7 +316,7 @@ class BulbScrew:
                   "env_info/grip_width", "env_info/task_err", "env_info/is_success",
                   "env_info/diverged", "env_info/d_xy", "env_info/depth",
                   "env_info/reached_socket", "env_info/spin_turns",
-                  "env_info/fallen"):
+                  "env_info/fallen", "env_info/grasped"):
             info[k] = 0.0
         return state.replace(
             data=data,
@@ -316,7 +328,8 @@ class BulbScrew:
                                 "steps_at_depth": 0,
                                 "prev_yaw": self._stage_terms(data)[2],
                                 "spin_total": 0.0, "reached_socket": 0.0,
-                                "steps_tilted": 0},
+                                "steps_tilted": 0, "grasped_ever": 0.0,
+                                "grasped_steps": 0.0},
         )
 
     @partial(jax.vmap, in_axes=(None, 0, 0))
@@ -358,6 +371,13 @@ class BulbScrew:
         state.info["env_info/depth"] = depth
         state.info["env_info/reached_socket"] = state.info_episode_store["reached_socket"]
         state.info["env_info/spin_turns"] = spin_turns
+
+        # grasp: two-sided pinch, from contacts
+        grasped = self._grasped(data)
+        state.info_episode_store["grasped_ever"] = jnp.maximum(
+            state.info_episode_store["grasped_ever"], grasped.astype(jnp.float32))
+        state.info_episode_store["grasped_steps"] += grasped.astype(jnp.float32)
+        state.info["env_info/grasped"] = grasped.astype(jnp.float32)
 
         # depth held for HOLD_SECONDS -> screwed home (SIM_CHANGES.md 2)
         at_depth = r_info["env_info/d_seat"] < self.success_threshold
@@ -410,6 +430,15 @@ class BulbScrew:
         state.info["rollout/spin_turns"] = jnp.where(done, spin_turns, state.info["rollout/spin_turns"])
         state.info["rollout/depth"] = jnp.where(done, depth, state.info["rollout/depth"])
         state.info["rollout/fallen"] = jnp.where(done, fallen.astype(jnp.float32), state.info["rollout/fallen"])
+        # did the gripper ever actually hold the bulb, and for what fraction of
+        # the episode -- a policy that grabs and drops repeatedly looks very
+        # different from one that keeps hold
+        state.info["rollout/grasped"] = jnp.where(
+            done, state.info_episode_store["grasped_ever"], state.info["rollout/grasped"])
+        state.info["rollout/grasp_frac"] = jnp.where(
+            done, state.info_episode_store["grasped_steps"]
+                  / jnp.maximum(state.info_episode_store["episode_length"], 1),
+            state.info["rollout/grasp_frac"])
 
         def when_done(_):
             start_state = self._reset(state)
@@ -462,6 +491,24 @@ class BulbScrew:
         clipf = lambda v, hi: jnp.clip(jnp.nan_to_num(v, nan=hi, posinf=hi), 0.0, hi)
         return (clipf(d_seat, self.ERR_CLIP), clipf(upright_err, 2.0),
                 clipf(d_ee_neck, self.ERR_CLIP))
+
+    def _grasped(self, data):
+        """True when the bulb is pinched between BOTH fingertips.
+
+        Read from actual contacts rather than inferred from gripper width, so
+        closing the jaws next to the bulb does not count. Only contacts with
+        dist < 0 (actually engaged) are considered.
+        """
+        g1, g2 = data.contact.geom1, data.contact.geom2
+        active = data.contact.dist < 0.0
+        bulb = self.bulb_geom_ids
+
+        def side(pad_ids):
+            pad_g1 = jnp.isin(g1, pad_ids) & jnp.isin(g2, bulb)
+            pad_g2 = jnp.isin(g2, pad_ids) & jnp.isin(g1, bulb)
+            return jnp.any(active & (pad_g1 | pad_g2))
+
+        return side(self.left_pad_ids) & side(self.right_pad_ids)
 
     def get_observation(self, data):
         _, quat, _, tip, neck = self._bulb_frame(data)
@@ -533,8 +580,10 @@ class BulbScrew:
         if self.feature_fn == "base_rbf":
             # peaked goal-centered bumps: matching the expert requires actually
             # seating the bulb, not matching an average distance (pushT lesson).
-            # Strict SUPERSET of `base` -- it carries base's -ctrl term too, so it
-            # cannot be worse than base at anything.
+            # This is a strict SUPERSET of `base` -- it carries base's -ctrl term
+            # too. Dropping it (as the pushT version does) left the set unable to
+            # tell a gentle motion from full-throttle thrashing, which is a
+            # capability `base` had.
             seat_tight = jnp.exp(-(d_seat / 0.02) ** 2)
             seat_wide = jnp.exp(-(d_seat / 0.08) ** 2)
             up_bump = jnp.exp(-(upright_err / 0.10) ** 2)
@@ -563,12 +612,12 @@ class BulbScrew:
             align_bump = jnp.exp(-(d_xy / self.XY_TOL) ** 2)
             seated_bump = jnp.exp(-(depth / self.DEPTH_SOLVED) ** 2)
             grasp_bump = jnp.exp(-(d_ee_neck / 0.05) ** 2)
-            # upright_err and ctrl are NOT optional. Without upright_err a bulb
-            # tilted 45 deg is indistinguishable from an upright one, so the
+            # upright_err and ctrl are NOT optional here. Without upright_err a
+            # bulb tilted 45 deg is indistinguishable from an upright one, so the
             # reward would pay a policy for carrying a tilted bulb that cannot be
             # inserted -- and the env's own fall check is built on this very
-            # quantity. Without ctrl nothing prefers a controlled motion to
-            # full-throttle thrashing.
+            # quantity. Without ctrl there is nothing preferring a controlled
+            # motion to full-throttle thrashing.
             ctrl = jnp.sum(jnp.square(action), axis=-1)
             features = jnp.stack([-d_xy, -depth, -upright_err, -d_ee_neck, width,
                                   screw_rate, -ctrl,
