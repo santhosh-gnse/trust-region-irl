@@ -117,6 +117,19 @@ class BulbScrew:
     # from a scalar return. The task is three things in sequence -- get the tip
     # over the hole, get it into the mouth, then turn it down -- and a return
     # curve blurs all three together.
+    # Fallen-bulb detection: end the episode instead of running out the horizon
+    # on a bulb lying on the table. Thresholds are set from the demonstrations:
+    # tilt while gripped peaks at ~37 deg, and the only excursions past 90 deg
+    # are single-frame mocap spikes (0.8% of steps), so a 90 deg tilt HELD for
+    # half a second is unambiguous. A drop below the plank means it left the
+    # table entirely.
+    FALL_TILT = 0.7            # upright_err (= 1 - cos tilt); 0.7 is ~72 deg over.
+                               # Demos peak at 0.20 (37 deg) while gripped, so this
+                               # has ~2x headroom; 1.0 would sit exactly on 90 deg
+                               # and a bulb lying flat would not trip it.
+    FALL_HOLD_S = 0.5          # must stay tilted this long -- spikes are noise
+    FALL_Z = -0.02             # m; bulb body below this has left the table
+
     XY_TOL = 0.008             # m; tip within this of the socket axis = aligned
     MOUTH_DEPTH = 0.010        # m; tip below this above the seat = in the mouth
                                # (the real bulb rests 5.6 mm proud before screwing)
@@ -134,6 +147,7 @@ class BulbScrew:
         self.reward_style = reward_style
         self.success_threshold = success_threshold      # depth, metres
         self.hold_steps = int(round(self.HOLD_SECONDS * self.CONTROL_FREQ))
+        self.fall_hold_steps = max(int(round(self.FALL_HOLD_S * self.CONTROL_FREQ)), 1)
         self.feature_fn = feature_fn
 
         xml_path = (Path(__file__).resolve().parent / "data" / "scene_mjx_bulb.xml").as_posix()
@@ -254,11 +268,13 @@ class BulbScrew:
             "rollout/reached_socket": 0.0,
             "rollout/spin_turns": 0.0,
             "rollout/depth": 0.0,
+            "rollout/fallen": 0.0,
             "env_info/d_seat": 0.0,
             "env_info/d_xy": 0.0,
             "env_info/depth": 0.0,
             "env_info/reached_socket": 0.0,
             "env_info/spin_turns": 0.0,
+            "env_info/fallen": 0.0,
             "env_info/upright_err": 0.0,
             "env_info/d_ee_neck": 0.0,
             "env_info/grip_width": 0.0,
@@ -268,7 +284,8 @@ class BulbScrew:
         }
         info_episode_store = {"episode_return": 0.0, "episode_length": 0,
                               "steps_at_depth": 0, "prev_yaw": 0.0,
-                              "spin_total": 0.0, "reached_socket": 0.0}
+                              "spin_total": 0.0, "reached_socket": 0.0,
+                              "steps_tilted": 0}
         state = State(data, next_observation, next_observation, 0.0, False, False,
                       info, info_episode_store, key)
         return self._reset(state)
@@ -285,7 +302,8 @@ class BulbScrew:
         for k in ("env_info/d_seat", "env_info/upright_err", "env_info/d_ee_neck",
                   "env_info/grip_width", "env_info/task_err", "env_info/is_success",
                   "env_info/diverged", "env_info/d_xy", "env_info/depth",
-                  "env_info/reached_socket", "env_info/spin_turns"):
+                  "env_info/reached_socket", "env_info/spin_turns",
+                  "env_info/fallen"):
             info[k] = 0.0
         return state.replace(
             data=data,
@@ -296,7 +314,8 @@ class BulbScrew:
             info_episode_store={"episode_return": 0.0, "episode_length": 0,
                                 "steps_at_depth": 0,
                                 "prev_yaw": self._stage_terms(data)[2],
-                                "spin_total": 0.0, "reached_socket": 0.0},
+                                "spin_total": 0.0, "reached_socket": 0.0,
+                                "steps_tilted": 0},
         )
 
     @partial(jax.vmap, in_axes=(None, 0, 0))
@@ -348,8 +367,21 @@ class BulbScrew:
         bulb_rel = data.xpos[self.bulb_body_id] - self.seat_pos
         diverged = (jnp.nan_to_num(jnp.linalg.norm(bulb_rel), nan=jnp.inf) > self.DIVERGE_BOUND) \
             | jnp.any(jnp.isnan(data.qpos)) | jnp.any(jnp.isnan(data.qvel))
+        # Fallen bulb: tipped over and stayed over, or dropped off the table.
+        # Routed to `truncated`, NOT `terminated`, on purpose: the dense reward is
+        # negative per step, so making a failure END the episode would reward
+        # dropping the bulb immediately (the checkpoint-gaming trap from pushT).
+        # Truncation bootstraps, so ending early gains the policy nothing -- it
+        # only stops the sim wasting a horizon on a bulb lying on the table.
+        _, upright_err, _ = self._task_errors(data)
+        tilted = (upright_err > self.FALL_TILT) | (data.xpos[self.bulb_body_id][2] < self.FALL_Z)
+        state.info_episode_store["steps_tilted"] = jnp.where(
+            tilted, state.info_episode_store["steps_tilted"] + 1, 0)
+        fallen = state.info_episode_store["steps_tilted"] >= self.fall_hold_steps
+        state.info["env_info/fallen"] = fallen.astype(jnp.float32)
+
         at_horizon = state.info_episode_store["episode_length"] >= self.horizon
-        truncated = at_horizon | diverged
+        truncated = at_horizon | diverged | fallen
         done = terminated | truncated
 
         state.info.update(r_info)
@@ -358,6 +390,12 @@ class BulbScrew:
 
         # log aggregates only on genuine completions (success or horizon), so
         # divergence-resets can't pollute the means
+        # Fallen episodes are EXCLUDED from the return/length means. The dense
+        # reward is negative per step, so a short failure scores better than a
+        # long success (~-210 vs ~-675): including them would make the return
+        # curve RISE as the policy drops the bulb more often. Failure is tracked
+        # separately and unconfounded by rollout/fallen and rollout/is_success,
+        # both of which are recorded on every episode end.
         log_done = terminated | at_horizon
         state.info["rollout/episode_return"] = jnp.where(log_done, state.info_episode_store["episode_return"], state.info["rollout/episode_return"])
         state.info["rollout/episode_length"] = jnp.where(log_done, state.info_episode_store["episode_length"], state.info["rollout/episode_length"])
@@ -370,6 +408,7 @@ class BulbScrew:
             done, state.info_episode_store["reached_socket"], state.info["rollout/reached_socket"])
         state.info["rollout/spin_turns"] = jnp.where(done, spin_turns, state.info["rollout/spin_turns"])
         state.info["rollout/depth"] = jnp.where(done, depth, state.info["rollout/depth"])
+        state.info["rollout/fallen"] = jnp.where(done, fallen.astype(jnp.float32), state.info["rollout/fallen"])
 
         def when_done(_):
             start_state = self._reset(state)
