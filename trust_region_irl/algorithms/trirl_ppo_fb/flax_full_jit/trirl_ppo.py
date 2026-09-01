@@ -639,11 +639,19 @@ class TRIRL_PPO:
                         "eval/episode_return": jnp.mean(eval_env_state.info["rollout/episode_return"]),
                         "eval/episode_length": jnp.mean(eval_env_state.info["rollout/episode_length"]),
                     }
-                    # pushT-specific rollout stats; other envs don't populate these
-                    if "rollout/is_success" in eval_env_state.info:
-                        eval_metrics["eval/is_success"] = jnp.mean(eval_env_state.info["rollout/is_success"])
-                    if "rollout/task_err" in eval_env_state.info:
-                        eval_metrics["eval/task_err"] = jnp.mean(eval_env_state.info["rollout/task_err"])
+                    # Mirror every per-episode stat the env reports into the eval
+                    # metrics. The eval rollout is the DETERMINISTIC one, so these
+                    # are the numbers worth judging a policy on -- the stochastic
+                    # training averages can look healthy while the mean-action
+                    # policy does nothing (that happened on pushT). Envs populate
+                    # different subsets, so this only takes what is present.
+                    for _k in ("is_success", "task_err", "diverged",
+                               "grasped", "grasp_frac",          # ever held it, and total time holding
+                               "grasp_streak", "grasp_drops",    # longest unbroken hold, and how often it let go
+                               "reached_socket", "spin_turns",   # got it into the socket, and turned it
+                               "depth", "fallen"):
+                        if f"rollout/{_k}" in eval_env_state.info:
+                            eval_metrics[f"eval/{_k}"] = jnp.mean(eval_env_state.info[f"rollout/{_k}"])
 
                     def callback(metrics_and_global_step):
                         metrics, combined_learning_iteration_step = metrics_and_global_step
