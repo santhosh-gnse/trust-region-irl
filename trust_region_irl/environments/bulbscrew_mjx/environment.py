@@ -280,6 +280,8 @@ class BulbScrew:
             "rollout/fallen": 0.0,
             "rollout/grasped": 0.0,
             "rollout/grasp_frac": 0.0,
+            "rollout/grasp_streak": 0.0,
+            "rollout/grasp_drops": 0.0,
             "env_info/d_seat": 0.0,
             "env_info/d_xy": 0.0,
             "env_info/depth": 0.0,
@@ -298,7 +300,9 @@ class BulbScrew:
                               "steps_at_depth": 0, "prev_yaw": 0.0,
                               "spin_total": 0.0, "reached_socket": 0.0,
                               "steps_tilted": 0, "grasped_ever": 0.0,
-                              "grasped_steps": 0.0}
+                              "grasped_steps": 0.0, "grasp_streak_cur": 0.0,
+                              "grasp_streak_max": 0.0, "grasp_drops": 0.0,
+                              "grasped_prev": 0.0}
         state = State(data, next_observation, next_observation, 0.0, False, False,
                       info, info_episode_store, key)
         return self._reset(state)
@@ -329,7 +333,9 @@ class BulbScrew:
                                 "prev_yaw": self._stage_terms(data)[2],
                                 "spin_total": 0.0, "reached_socket": 0.0,
                                 "steps_tilted": 0, "grasped_ever": 0.0,
-                                "grasped_steps": 0.0},
+                                "grasped_steps": 0.0, "grasp_streak_cur": 0.0,
+                                "grasp_streak_max": 0.0, "grasp_drops": 0.0,
+                                "grasped_prev": 0.0},
         )
 
     @partial(jax.vmap, in_axes=(None, 0, 0))
@@ -377,6 +383,18 @@ class BulbScrew:
         state.info_episode_store["grasped_ever"] = jnp.maximum(
             state.info_episode_store["grasped_ever"], grasped.astype(jnp.float32))
         state.info_episode_store["grasped_steps"] += grasped.astype(jnp.float32)
+        # CONTINUITY, not just total. A latched "ever grasped" counts an accidental
+        # brush, and grasp_frac cannot tell one long hold from twenty grabs and
+        # drops summing to the same total. The longest unbroken run says whether
+        # the gripper can actually carry the bulb; the drop count says how often
+        # it lets go after having held it.
+        streak = jnp.where(grasped, state.info_episode_store["grasp_streak_cur"] + 1.0, 0.0)
+        state.info_episode_store["grasp_streak_cur"] = streak
+        state.info_episode_store["grasp_streak_max"] = jnp.maximum(
+            state.info_episode_store["grasp_streak_max"], streak)
+        dropped = (state.info_episode_store["grasped_prev"] > 0.5) & (~grasped)
+        state.info_episode_store["grasp_drops"] += dropped.astype(jnp.float32)
+        state.info_episode_store["grasped_prev"] = grasped.astype(jnp.float32)
         state.info["env_info/grasped"] = grasped.astype(jnp.float32)
 
         # depth held for HOLD_SECONDS -> screwed home (SIM_CHANGES.md 2)
@@ -439,6 +457,10 @@ class BulbScrew:
             done, state.info_episode_store["grasped_steps"]
                   / jnp.maximum(state.info_episode_store["episode_length"], 1),
             state.info["rollout/grasp_frac"])
+        state.info["rollout/grasp_streak"] = jnp.where(
+            done, state.info_episode_store["grasp_streak_max"], state.info["rollout/grasp_streak"])
+        state.info["rollout/grasp_drops"] = jnp.where(
+            done, state.info_episode_store["grasp_drops"], state.info["rollout/grasp_drops"])
 
         def when_done(_):
             start_state = self._reset(state)
