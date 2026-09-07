@@ -87,12 +87,22 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--in-dir", type=Path, required=True)
     ap.add_argument("--out-dir", type=Path, required=True)
-    ap.add_argument("--max-linear-speed", type=float, default=0.10)
+    # Defaults REPRODUCE the committed dataset
+    # (trirl_dataset/rl_expert/expert_dataset_bulbscrew_real_27.npz), so running
+    # this with no flags regenerates it. They are the ACHIEVED rates, not the
+    # rig's configured 0.10/0.75: at the configured wrist limit 64% of turning
+    # steps saturate, under-reporting the true rate by 2.4x, and a policy limited
+    # to it could not finish inside the horizon. Keep these in step with
+    # bulbscrew_mjx's MAX_SPEED / MAX_YAW_RATE -- if the two disagree, an action
+    # of 1.0 means different speeds in the data and in the simulator.
+    ap.add_argument("--max-linear-speed", type=float, default=0.17)
     ap.add_argument("--max-yaw-rate", type=float, default=2.6)
-    ap.add_argument("--smooth", type=int, default=3,
+    ap.add_argument("--smooth", type=int, default=5,
                     help="moving-average window on the derived velocities; hand "
                          "motion is noisy at 20 Hz and raw differences label the "
-                         "expert as jittering (the recorder low-pass filters too)")
+                         "expert as jittering (the recorder low-pass filters too). "
+                         "5 is what the committed dataset was built with; 3 and 7 "
+                         "were measured to be within noise of it")
     ap.add_argument("--dry-run", action="store_true", help="measure only, write nothing")
     args = ap.parse_args()
 
