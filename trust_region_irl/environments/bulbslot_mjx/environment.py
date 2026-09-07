@@ -275,16 +275,12 @@ class BulbSlot:
         if self.feature_fn == "state_action":
             feature_dim = self.single_observation_space.shape[0] + self.single_action_space.shape[0]
         elif self.feature_fn == "base":
-            feature_dim = 5  # [-d_seat, -upright_err, -d_ee_grasp, width, -ctrl]
+            feature_dim = 4  # [-d_seat, -upright_err, -d_ee_grasp, width]
         elif self.feature_fn == "base_rbf":
-            feature_dim = 9  # all of base (incl. -ctrl) + seat_tight, seat_wide,
-                             # up_bump, grasp_bump
+            feature_dim = 8  # all of base + seat_tight, seat_wide, up_bump, grasp_bump
         elif self.feature_fn == "base_slot":
-            feature_dim = 8   # -d_xy, -|depth|, -d_ee_grasp, width, -ctrl,
+            feature_dim = 7   # -d_xy, -|depth|, -d_ee_grasp, width,
                               # align_bump, seated_bump, grasp_bump
-        elif self.feature_fn == "base_screw":
-            feature_dim = 10  # -d_xy, -|depth|, -upright_err, -d_ee_grasp, width,
-                              # screw_rate, -ctrl, align_bump, seated_bump, grasp_bump
         else:
             feature_dim = self.single_observation_space.shape[0]
         self.single_features_shape = BoxSpace(
@@ -767,8 +763,14 @@ class BulbSlot:
             seat_wide = jnp.exp(-(d_seat / 0.08) ** 2)
             up_bump = jnp.exp(-(upright_err / 0.10) ** 2)
             grasp_bump = jnp.exp(-(d_ee_neck / 0.05) ** 2)
-            ctrl = jnp.sum(jnp.square(action), axis=-1)
-            features = jnp.stack([-d_seat, -upright_err, -d_ee_neck, width, -ctrl,
+            # NOTE features are state-only, psi(x). The reward is linear in
+            # them, so an action term would make the recovered reward r(x, a) --
+            # which breaks the assumption the function-space update rests on, and
+            # with it the cross-embodiment transfer that motivates recovering a
+            # cost rather than a policy. A control-effort term was removed here
+            # for that reason. (pushT's base_rbf, the set that solved that task,
+            # was already action-free.)
+            features = jnp.stack([-d_seat, -upright_err, -d_ee_neck, width,
                                   seat_tight, seat_wide, up_bump, grasp_bump], axis=-1)
         elif self.feature_fn == "base_slot":
             # The slotting counterpart of base_screw. Two deliberate omissions:
@@ -781,48 +783,29 @@ class BulbSlot:
             # hole, get it down into the mouth, and hold on until then.
             d_xy = jnp.linalg.norm(observation[:, 0:2], axis=-1)
             depth = jnp.abs(observation[:, 2])
-            ctrl = jnp.sum(jnp.square(action), axis=-1)
             align_bump = jnp.exp(-(d_xy / self.XY_TOL) ** 2)
             seated_bump = jnp.exp(-(depth / self.DEPTH_SOLVED) ** 2)
             grasp_bump = jnp.exp(-(d_ee_neck / 0.05) ** 2)
-            features = jnp.stack([-d_xy, -depth, -d_ee_neck, width, -ctrl,
-                                  align_bump, seated_bump, grasp_bump], axis=-1)
-        elif self.feature_fn == "base_screw":
-            # Splits d_seat into the two axes the task actually progresses along
-            # and adds the screwing signal, which base/base_rbf cannot express:
-            # both are yaw-invariant, so they reward "near the seat" without ever
-            # distinguishing RESTING PROUD from TURNED DOWN -- the same blind spot
-            # the old success criterion had.
-            #
-            # NOTE spin here is a RATE, not accumulated turns: features are a
-            # function of ONE transition, so total rotation is not available.
-            # Screwing is expressed as "turning while engaged", which is: the
-            # commanded yaw magnitude gated by being aligned and in the mouth.
-            d_xy = jnp.linalg.norm(observation[:, 0:2], axis=-1)
-            depth = jnp.abs(observation[:, 2])        # |z| : 0 = screwed home
-            # smooth engagement gate, so the gradient survives (a hard AND has none)
-            engaged = (jnp.exp(-(d_xy / self.XY_TOL) ** 2)
-                       * jnp.exp(-(jnp.maximum(observation[:, 2], 0.0)
-                                   / self.MOUTH_DEPTH) ** 2))
-            screw_rate = engaged * jnp.abs(action[:, 3])
-            align_bump = jnp.exp(-(d_xy / self.XY_TOL) ** 2)
-            seated_bump = jnp.exp(-(depth / self.DEPTH_SOLVED) ** 2)
-            grasp_bump = jnp.exp(-(d_ee_neck / 0.05) ** 2)
-            # upright_err and ctrl are NOT optional here. Without upright_err a
-            # bulb tilted 45 deg is indistinguishable from an upright one, so the
-            # reward would pay a policy for carrying a tilted bulb that cannot be
-            # inserted -- and the env's own fall check is built on this very
-            # quantity. Without ctrl there is nothing preferring a controlled
-            # motion to full-throttle thrashing.
-            ctrl = jnp.sum(jnp.square(action), axis=-1)
-            features = jnp.stack([-d_xy, -depth, -upright_err, -d_ee_neck, width,
-                                  screw_rate, -ctrl,
+            # NOTE features are state-only, psi(x). The reward is linear in
+            # them, so an action term would make the recovered reward r(x, a) --
+            # which breaks the assumption the function-space update rests on, and
+            # with it the cross-embodiment transfer that motivates recovering a
+            # cost rather than a policy. A control-effort term was removed here
+            # for that reason. (pushT's base_rbf, the set that solved that task,
+            # was already action-free.)
+            features = jnp.stack([-d_xy, -depth, -d_ee_neck, width,
                                   align_bump, seated_bump, grasp_bump], axis=-1)
         elif self.feature_fn == "state_action":
             features = jnp.concatenate([observation, action], axis=-1)
         elif self.feature_fn == "base":
-            ctrl = jnp.sum(jnp.square(action), axis=-1)
-            features = jnp.stack([-d_seat, -upright_err, -d_ee_neck, width, -ctrl], axis=-1)
+            # NOTE features are state-only, psi(x). The reward is linear in
+            # them, so an action term would make the recovered reward r(x, a) --
+            # which breaks the assumption the function-space update rests on, and
+            # with it the cross-embodiment transfer that motivates recovering a
+            # cost rather than a policy. A control-effort term was removed here
+            # for that reason. (pushT's base_rbf, the set that solved that task,
+            # was already action-free.)
+            features = jnp.stack([-d_seat, -upright_err, -d_ee_neck, width], axis=-1)
         else:
             features = observation
 

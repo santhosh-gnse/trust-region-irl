@@ -217,13 +217,12 @@ class BulbScrew:
         if self.feature_fn == "state_action":
             feature_dim = self.single_observation_space.shape[0] + self.single_action_space.shape[0]
         elif self.feature_fn == "base":
-            feature_dim = 5  # [-d_seat, -upright_err, -d_ee_grasp, width, -ctrl]
+            feature_dim = 4  # [-d_seat, -upright_err, -d_ee_grasp, width]
         elif self.feature_fn == "base_rbf":
-            feature_dim = 9  # all of base (incl. -ctrl) + seat_tight, seat_wide,
-                             # up_bump, grasp_bump
+            feature_dim = 8  # all of base + seat_tight, seat_wide, up_bump, grasp_bump
         elif self.feature_fn == "base_screw":
-            feature_dim = 10  # -d_xy, -|depth|, -upright_err, -d_ee_grasp, width,
-                              # screw_rate, -ctrl, align_bump, seated_bump, grasp_bump
+            feature_dim = 9   # -d_xy, -|depth|, -upright_err, -d_ee_grasp, width,
+                              # screw_rate, align_bump, seated_bump, grasp_bump
         else:
             feature_dim = self.single_observation_space.shape[0]
         self.single_features_shape = BoxSpace(
@@ -610,8 +609,11 @@ class BulbScrew:
             seat_wide = jnp.exp(-(d_seat / 0.08) ** 2)
             up_bump = jnp.exp(-(upright_err / 0.10) ** 2)
             grasp_bump = jnp.exp(-(d_ee_neck / 0.05) ** 2)
-            ctrl = jnp.sum(jnp.square(action), axis=-1)
-            features = jnp.stack([-d_seat, -upright_err, -d_ee_neck, width, -ctrl,
+            # Features are state-only, psi(x). The reward is linear in them, so
+            # an action term makes the recovered reward r(x, a), breaking the
+            # assumption the function-space update rests on and the
+            # cross-embodiment transfer that motivates recovering a cost at all.
+            features = jnp.stack([-d_seat, -upright_err, -d_ee_neck, width,
                                   seat_tight, seat_wide, up_bump, grasp_bump], axis=-1)
         elif self.feature_fn == "base_screw":
             # Splits d_seat into the two axes the task actually progresses along
@@ -630,25 +632,33 @@ class BulbScrew:
             engaged = (jnp.exp(-(d_xy / self.XY_TOL) ** 2)
                        * jnp.exp(-(jnp.maximum(observation[:, 2], 0.0)
                                    / self.MOUTH_DEPTH) ** 2))
-            screw_rate = engaged * jnp.abs(action[:, 3])
+            # ACHIEVED wrist rate from arm_qvel (joint 7 is the wrist), not the
+            # commanded action[3]. State-only as the assumption requires, and
+            # strictly better besides: it reads what the wrist actually did
+            # rather than what was asked, so it does not inherit MAX_YAW_RATE.
+            screw_rate = engaged * jnp.abs(observation[:, 24])
             align_bump = jnp.exp(-(d_xy / self.XY_TOL) ** 2)
             seated_bump = jnp.exp(-(depth / self.DEPTH_SOLVED) ** 2)
             grasp_bump = jnp.exp(-(d_ee_neck / 0.05) ** 2)
-            # upright_err and ctrl are NOT optional here. Without upright_err a
-            # bulb tilted 45 deg is indistinguishable from an upright one, so the
-            # reward would pay a policy for carrying a tilted bulb that cannot be
-            # inserted -- and the env's own fall check is built on this very
-            # quantity. Without ctrl there is nothing preferring a controlled
-            # motion to full-throttle thrashing.
-            ctrl = jnp.sum(jnp.square(action), axis=-1)
+            # upright_err is NOT optional: without it a bulb tilted 45 deg is
+            # indistinguishable from an upright one, so the reward would pay a
+            # policy for carrying a tilted bulb that cannot be inserted -- and the
+            # env's own fall check is built on this very quantity.
+            # Features are state-only, psi(x). The reward is linear in them, so
+            # an action term makes the recovered reward r(x, a), breaking the
+            # assumption the function-space update rests on and the
+            # cross-embodiment transfer that motivates recovering a cost at all.
             features = jnp.stack([-d_xy, -depth, -upright_err, -d_ee_neck, width,
-                                  screw_rate, -ctrl,
+                                  screw_rate,
                                   align_bump, seated_bump, grasp_bump], axis=-1)
         elif self.feature_fn == "state_action":
             features = jnp.concatenate([observation, action], axis=-1)
         elif self.feature_fn == "base":
-            ctrl = jnp.sum(jnp.square(action), axis=-1)
-            features = jnp.stack([-d_seat, -upright_err, -d_ee_neck, width, -ctrl], axis=-1)
+            # Features are state-only, psi(x). The reward is linear in them, so
+            # an action term makes the recovered reward r(x, a), breaking the
+            # assumption the function-space update rests on and the
+            # cross-embodiment transfer that motivates recovering a cost at all.
+            features = jnp.stack([-d_seat, -upright_err, -d_ee_neck, width], axis=-1)
         else:
             features = observation
 
