@@ -88,10 +88,7 @@ class PizzaSpread:
                                # task is meant to be planar, so hold it properly.
     OBS_CLIP = 10.0
 
-    # Pizza geometry. The centre is the dataset's home_position in x/y (the board's
-    # measured physical centre); the radius is REGRESSED from the demonstrations --
-    # per-episode maximum radius has p90 = 156 mm, a 312 mm pizza, containing 99.7%
-    # of all logged samples. Spirals start at ~6 mm and end at ~142 mm.
+    # Pizza geometry: centre and radius are REGRESSED from the demonstrations.
     # The demonstrated sweep is not centred on the tool's home pose -- it sits
     # 15 mm behind it in x. Fitting the disc to the sweep instead of assuming it
     # is centred on home lets the same demonstrations cover more of the pizza
@@ -102,6 +99,18 @@ class PizzaSpread:
     PIZZA_R = 0.146
     TOOL_R = 0.015             # tool sphere radius; the swept footprint
     Z_HOLD = HOME_POS[2]       # IK holds the tool at the home height
+
+    # Early termination for wandering off the pizza. The margin is set strictly
+    # above what any real demonstration ever reaches -- max radial excess beyond
+    # the fitted edge is 14 mm over all 117 episodes -- so a real trajectory can
+    # NEVER cross it, regardless of hold time. The hold duration is calibrated
+    # against the arm's own recovery dynamics: driving the tool constantly outward
+    # does not diverge monotonically -- the null-space qhome pull drags it back
+    # after a few dozen steps -- so a policy that is actually stuck off-pizza (not
+    # just transiently overshooting) sustains beyond this margin for 30+ steps in
+    # practice, well clear of the 10-step hold.
+    WANDER_MARGIN = 0.025      # m beyond PIZZA_R (real-data max excess is 14 mm)
+    WANDER_HOLD_S = 0.5        # s continuously beyond that margin before truncating
 
     # coverage grid -- LOGGING ONLY, never a reward feature (see get_features)
     N_RAD, N_ANG = 8, 24       # 192 cells; ~18 mm radial x ~38 mm arc at the rim,
@@ -276,6 +285,7 @@ class PizzaSpread:
             "rollout/max_radius": 0.0,
             "rollout/off_pizza_frac": 0.0,
             "rollout/diverged": 0.0,
+            "rollout/wandered_off": 0.0,
             "env_info/coverage": 0.0,
             "env_info/radius": 0.0,
             "env_info/off_pizza": 0.0,
@@ -285,7 +295,7 @@ class PizzaSpread:
         }
         store = {"episode_return": 0.0, "episode_length": 0,
                  "visited": jnp.zeros(self.N_RAD * self.N_ANG, dtype=jnp.float32),
-                 "max_radius": 0.0, "off_steps": 0.0}
+                 "max_radius": 0.0, "off_steps": 0.0, "wander_steps": 0.0}
         state = State(data, next_observation, next_observation, 0.0, False, False,
                       info, store, key)
         return self._reset(state)
@@ -314,7 +324,8 @@ class PizzaSpread:
             data=data, next_observation=obs, actual_next_observation=obs,
             reward=0.0, terminated=False, truncated=False, info=info,
             info_episode_store={"episode_return": 0.0, "episode_length": 0,
-                                "visited": visited, "max_radius": 0.0, "off_steps": 0.0},
+                                "visited": visited, "max_radius": 0.0, "off_steps": 0.0,
+                                "wander_steps": 0.0},
         )
 
     @partial(jax.vmap, in_axes=(None, 0, 0))
@@ -347,8 +358,14 @@ class PizzaSpread:
 
         terminated = r_info["env_info/is_success"] > 0.5
         diverged = jnp.any(jnp.isnan(data.qpos)) | jnp.any(jnp.isnan(data.qvel))
+
+        # wandered off the pizza: past the margin, held continuously for WANDER_HOLD_S
+        beyond_margin = r_info["env_info/off_pizza"] > self.WANDER_MARGIN
+        store["wander_steps"] = jnp.where(beyond_margin, store["wander_steps"] + 1, 0.0)
+        wandered_off = store["wander_steps"] >= self.WANDER_HOLD_S * self.CONTROL_FREQ
+
         at_horizon = store["episode_length"] >= self.horizon
-        truncated = at_horizon | diverged
+        truncated = at_horizon | diverged | wandered_off
         done = terminated | truncated
 
         state.info.update(r_info)
@@ -366,6 +383,7 @@ class PizzaSpread:
             done, store["off_steps"] / jnp.maximum(store["episode_length"], 1),
             state.info["rollout/off_pizza_frac"])
         state.info["rollout/diverged"] = jnp.where(done, diverged.astype(jnp.float32), state.info["rollout/diverged"])
+        state.info["rollout/wandered_off"] = jnp.where(done, wandered_off.astype(jnp.float32), state.info["rollout/wandered_off"])
 
         def when_done(_):
             s = self._reset(state)
