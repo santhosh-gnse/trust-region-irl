@@ -168,6 +168,10 @@ class PizzaSpread:
             fd = 6
         elif feature_fn == "spread":
             fd = 8
+        elif feature_fn == "reach":
+            fd = 4
+        elif feature_fn == "reach_rbf":
+            fd = 7
         else:
             fd = obs_dim
         self.single_features_shape = BoxSpace(
@@ -447,6 +451,25 @@ class PizzaSpread:
             features = jnp.concatenate([observation, action], axis=-1)
         elif self.feature_fn == "base":
             features = jnp.stack([r_norm, -off, -speed], axis=-1)
+        elif self.feature_fn == "reach":
+            # Informed variant (diagnosed from the stab runs): the plain r_norm
+            # keeps rising PAST the rim, so a loose policy hacks reward by driving
+            # off the board; and -speed rewards NOT moving, which caps a task whose
+            # whole point is travelling to sweep area. So: (1) CLAMP r_norm at 1.0
+            # -- reaching the rim is rewarded, going past it earns nothing extra;
+            # (2) DROP -speed; (3) keep -off as the wall; (4) two mid/outer RBFs so
+            # occupancy is pulled outward, not just to the centre.
+            r_clip = jnp.clip(r_norm, 0.0, 1.0)
+            b_mid = jnp.exp(-((r_norm - 0.5) / 0.2) ** 2)
+            b_out = jnp.exp(-((r_norm - 0.85) / 0.2) ** 2)
+            features = jnp.stack([r_clip, -off, b_mid, b_out], axis=-1)
+        elif self.feature_fn == "reach_rbf":
+            # reach + the full 5-bump radial occupancy bank (like spread, but with
+            # r_norm clamped at the rim and no -speed term).
+            r_clip = jnp.clip(r_norm, 0.0, 1.0)
+            bumps = [jnp.exp(-((r_norm - m) / 0.14) ** 2)
+                     for m in (0.1, 0.3, 0.5, 0.7, 0.9)]
+            features = jnp.stack([r_clip, -off] + bumps, axis=-1)
         else:
             features = observation
 

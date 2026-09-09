@@ -69,6 +69,13 @@ class TRIRL_PPO:
         self.evaluation_active = config.algorithm.evaluation_active
         self.batch_size = config.environment.nr_envs * config.algorithm.nr_steps
         self.nr_updates = config.algorithm.total_timesteps // self.batch_size
+        # LR-anneal denominator: cumulative on a RESUME (anneal_total_timesteps),
+        # else the loop's total_timesteps. Decoupling it from nr_updates lets a
+        # resumed run continue the schedule (the restored optimizer step keeps
+        # counting up) instead of restarting it or driving the LR negative.
+        _anneal_ts = getattr(config.algorithm, "anneal_total_timesteps", -1)
+        _anneal_ts = _anneal_ts if _anneal_ts and _anneal_ts > 0 else config.algorithm.total_timesteps
+        self.anneal_nr_updates = _anneal_ts // self.batch_size
         self.nr_minibatches = self.batch_size // self.minibatch_size
         if config.algorithm.evaluation_and_save_frequency == -1:
             self.evaluation_and_save_frequency = self.batch_size * (self.total_timesteps // self.batch_size)
@@ -81,6 +88,7 @@ class TRIRL_PPO:
         self.retraining = config.algorithm.retraining
         self.init_eta = config.algorithm.init_eta
         self.const_eta = config.algorithm.const_eta
+        self.eta_min = getattr(config.algorithm, "eta_min", 0.0)
 
         # Boltzmann Features Specific
         self.dsm_alpha = config.algorithm.dsm_alpha
@@ -118,11 +126,18 @@ class TRIRL_PPO:
         self.discriminator = get_discriminator(config, self.train_env, reward_type=self.reward_type)
 
         def linear_schedule(count):
-            fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs)) / self.nr_updates
+            fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs)) / self.anneal_nr_updates
+            # Clamp at 0: when the anneal horizon is SHORTER than training (e.g.
+            # anneal over 100M while training 200M), count outruns anneal_nr_updates
+            # and an unclamped fraction goes negative -> negative LR -> gradient
+            # ascent. Hold at 0 past the horizon instead. No effect when the anneal
+            # horizon equals total_timesteps (the default), so existing runs are unchanged.
+            fraction = jnp.maximum(0.0, fraction)
             return self.learning_rate * fraction
 
         def linear_schedule_disc(count):
-            fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs_disc)) / ((self.nr_updates * self.nr_epochs) / self.nr_epochs_disc)
+            fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs_disc)) / ((self.anneal_nr_updates * self.nr_epochs) / self.nr_epochs_disc)
+            fraction = jnp.maximum(0.0, fraction)
             return self.learning_rate * fraction
 
         learning_rate = linear_schedule if self.anneal_learning_rate else self.learning_rate
@@ -452,7 +467,11 @@ class TRIRL_PPO:
                             return self.init_eta
                         else:
                             fraction = 1.0 - jnp.clip(global_step, min=None, max=self.total_timesteps) / self.total_timesteps
-                            return self.init_eta * fraction
+                            # Anneal init_eta -> eta_min (a FLOOR), not -> 0. Keeping
+                            # eta above the floor holds the trust region tight enough
+                            # to avoid the late off-board collapse. eta_min=0 (default)
+                            # reproduces the original init_eta -> 0 schedule.
+                            return self.eta_min + (self.init_eta - self.eta_min) * fraction
 
                     combined_learning_iteration_step = (multi_learning_iteration_step * self.nr_updates_per_multi_learning_iteration) + learning_iteration_step + 1
                     global_step = combined_learning_iteration_step * self.nr_steps * self.nr_envs
@@ -649,7 +668,9 @@ class TRIRL_PPO:
                                "grasped", "grasp_frac",          # ever held it, and total time holding
                                "grasp_streak", "grasp_drops",    # longest unbroken hold, and how often it let go
                                "reached_socket", "spin_turns",   # got it into the socket, and turned it
-                               "depth", "fallen"):
+                               "depth", "fallen",
+                               "coverage", "max_radius",         # pizza: how much got swept, and how far out
+                               "off_pizza_frac", "wandered_off"):  # pizza: time spent off the board, and did it leave
                         if f"rollout/{_k}" in eval_env_state.info:
                             eval_metrics[f"eval/{_k}"] = jnp.mean(eval_env_state.info[f"rollout/{_k}"])
 

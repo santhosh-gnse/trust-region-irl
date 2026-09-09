@@ -171,6 +171,10 @@ class BulbSlot:
     XY_TOL = 0.008             # m; tip within this of the socket axis = aligned
     MOUTH_DEPTH = 0.010        # m; tip below this above the seat = in the mouth
                                # (the real bulb rests 5.6 mm proud before screwing)
+    GATE_XY_TOL = 0.04         # m; base_slot_gated: descent is only rewarded once
+                               # the bulb is within this of the socket axis (~mouth
+                               # radius) -- reachable at height, so the policy must
+                               # align over the socket before lowering counts.
 
     def __init__(self, render, horizon=400, reward_style="dense",
                  success_threshold=DEPTH_SOLVED, feature_fn="base"):
@@ -281,6 +285,25 @@ class BulbSlot:
         elif self.feature_fn == "base_slot":
             feature_dim = 7   # -d_xy, -|depth|, -d_ee_grasp, width,
                               # align_bump, seated_bump, grasp_bump
+        elif self.feature_fn == "base_slot_gated":
+            feature_dim = 7   # like base_slot, but the descent terms (depth,
+                              # seated_bump) are GATED by horizontal alignment, so
+                              # lowering is only rewarded once the bulb is over the
+                              # socket -- forces align-then-descend, not a diagonal
+                              # dive into the plank.
+        elif self.feature_fn == "base_gated":
+            feature_dim = 5   # BASE (the best-performing set: keeps upright_err),
+                              # but d_seat is split into d_xy (always) + depth GATED
+                              # by alignment, so descent is only rewarded over the
+                              # socket: [-d_xy, -depth*gate, -upright_err,
+                              # -d_ee_grasp, width]
+        elif self.feature_fn == "base_clear":
+            feature_dim = 5   # BASE + signed height z_rel_seat (obs[2]). d_seat and
+                              # depth both drop the SIGN, so the discriminator can't
+                              # tell "above the seat" (expert, transporting) from
+                              # "below" (the dive into the plank). This feature adds
+                              # it back so IRL can penalise the dive itself:
+                              # [-d_seat, -upright_err, -d_ee_grasp, width, z_rel_seat]
         else:
             feature_dim = self.single_observation_space.shape[0]
         self.single_features_shape = BoxSpace(
@@ -795,6 +818,42 @@ class BulbSlot:
             # was already action-free.)
             features = jnp.stack([-d_xy, -depth, -d_ee_neck, width,
                                   align_bump, seated_bump, grasp_bump], axis=-1)
+        elif self.feature_fn == "base_slot_gated":
+            # Like base_slot, but the DESCENT reward is gated by horizontal
+            # alignment: -depth and seated_bump are multiplied by align_gate, which
+            # is ~1 only when the bulb is over the socket (within GATE_XY_TOL) and
+            # ~0 when far. So lowering earns nothing until the bulb is over the
+            # hole -- the policy is pushed to align first (via -d_xy), THEN descend,
+            # instead of taking the greedy diagonal that dives into the plank.
+            d_xy = jnp.linalg.norm(observation[:, 0:2], axis=-1)
+            depth = jnp.abs(observation[:, 2])
+            align_gate = jnp.exp(-(d_xy / self.GATE_XY_TOL) ** 2)
+            align_bump = jnp.exp(-(d_xy / self.XY_TOL) ** 2)
+            seated_bump = jnp.exp(-(depth / self.DEPTH_SOLVED) ** 2) * align_gate
+            grasp_bump = jnp.exp(-(d_ee_neck / 0.05) ** 2)
+            features = jnp.stack([-d_xy, -depth * align_gate, -d_ee_neck, width,
+                                  align_bump, seated_bump, grasp_bump], axis=-1)
+        elif self.feature_fn == "base_gated":
+            # Build on BASE (the best set -- keeps upright_err, which base_slot drops)
+            # but fix the plank-dive: split d_seat into d_xy (horizontal, always) and
+            # depth (vertical) and GATE the depth by alignment, so lowering is only
+            # rewarded once the bulb is over the socket. Far -> only -d_xy pulls
+            # (align at height, no dive); aligned -> -depth pulls it down into the hole.
+            d_xy = jnp.linalg.norm(observation[:, 0:2], axis=-1)
+            depth = jnp.abs(observation[:, 2])
+            align_gate = jnp.exp(-(d_xy / self.GATE_XY_TOL) ** 2)
+            features = jnp.stack([-d_xy, -depth * align_gate, -upright_err,
+                                  -d_ee_neck, width], axis=-1)
+        elif self.feature_fn == "base_clear":
+            # BASE + the SIGNED vertical position z_rel_seat (obs[2]). d_seat (a
+            # 3-D norm) and depth (|z|) both discard the sign, so nothing tells the
+            # discriminator "above the seat" (where the expert transports) from
+            # "below" (the dive into the plank). Adding it lets IRL learn to reward
+            # staying above and penalise dropping below -- an obstacle signal the
+            # expert expresses, recovered rather than hand-shaped.
+            z_rel_seat = observation[:, 2]
+            features = jnp.stack([-d_seat, -upright_err, -d_ee_neck, width,
+                                  z_rel_seat], axis=-1)
         elif self.feature_fn == "state_action":
             features = jnp.concatenate([observation, action], axis=-1)
         elif self.feature_fn == "base":

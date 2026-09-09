@@ -9,6 +9,10 @@ def get_config(algorithm_name):
     config.device = "gpu"  # cpu, gpu
     config.nr_parallel_seeds = 1
     config.total_timesteps = 2e9
+    # LR-anneal denominator. -1 -> use total_timesteps. On a RESUME set this to the
+    # CUMULATIVE total (already-done + additional) so the anneal continues from the
+    # checkpoint instead of restarting/going negative. Float so the CLI accepts 500e6.
+    config.anneal_total_timesteps = -1.0
     config.learning_rate = 4e-4
     config.anneal_learning_rate = True
     config.nr_steps = 128
@@ -35,6 +39,8 @@ def get_config(algorithm_name):
     config.epsilon = 0.693139308915975
     config.init_eta = 100.0
     config.const_eta = False
+    config.eta_min = 0.0   # floor for the eta anneal; eta goes init_eta -> eta_min
+                           # (0.0 keeps the original init_eta -> 0 behaviour)
     config.beta = float(1/config.entropy_coef)
     config.gp_lambda = 0.03267622091691947
     config.gp_alpha = 0.5
