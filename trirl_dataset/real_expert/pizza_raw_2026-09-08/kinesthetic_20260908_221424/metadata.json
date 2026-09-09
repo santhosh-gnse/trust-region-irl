@@ -1,0 +1,8 @@
+{
+  "control_rate_hz": 20.0,
+  "observation_dim": 17,
+  "action_dim": 2,
+  "observation": "ee_rel_home_xyz + q7 + dq7",
+  "source": "kinesthetic (hand-guided); actions derived from tool motion",
+  "max_linear_speed": 0.1
+}
