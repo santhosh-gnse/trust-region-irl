@@ -151,6 +151,17 @@ class BulbSlot2D:
     EXPECTED_LENGTH = 182
     REF_N_BINS = 100
 
+    # Opt-in to the algorithm's mixed continuous/discrete action distribution
+    # (trirl_ppo_fb/mixed_action_distribution.py): index 2 (the gripper) is
+    # sampled as a calibrated Bernoulli-in-{-1,+1} rather than a continuous
+    # value thresholded at zero. Motivated by the real rig's own convention --
+    # franka_bulbslot2d's teleop treats the gripper as a LATCHED BUTTON, a
+    # genuinely binary decision, not a continuous joystick axis -- and by the
+    # observed training failure mode: a continuous action near a zero threshold
+    # is close to a coinflip every step under Gaussian exploration noise, which
+    # is what produced the open/close flicker seen in an early checkpoint.
+    discrete_action_dims = (2,)
+
     # Success is DEPTH held, not a pose test. The old
     # `d_seat + 0.1*upright_err < 0.02` is yaw-invariant (a bulb is a body of
     # revolution), so it cannot tell "resting in the socket mouth" from "screwed
@@ -330,7 +341,7 @@ class BulbSlot2D:
         if self.feature_fn == "state_action":
             feature_dim = self.single_observation_space.shape[0] + self.single_action_space.shape[0]
         elif self.feature_fn == "base":
-            feature_dim = 4  # [-d_seat, -upright_err, -d_ee_grasp, width]
+            feature_dim = 5  # [-d_seat, -upright_err, -d_ee_grasp, width, -drag]
         elif self.feature_fn == "base_rbf":
             feature_dim = 8  # all of base + seat_tight, seat_wide, up_bump, grasp_bump
         elif self.feature_fn == "base_slot":
@@ -959,7 +970,19 @@ class BulbSlot2D:
             # cost rather than a policy. A control-effort term was removed here
             # for that reason. (pushT's base_rbf, the set that solved that task,
             # was already action-free.)
-            features = jnp.stack([-d_seat, -upright_err, -d_ee_neck, width], axis=-1)
+            # DRAG (added after training under the 4-D base showed it): the bulb
+            # dropping to near-zero/negative clearance above the plank while still
+            # far from the seat -- reads ~0 for every real demo (their floor is
+            # 68 mm while >20 mm out) and grows for a policy that scrapes the bulb
+            # along the board instead of carrying it high like the expert does.
+            # Same single gated term base_slot already carries, reused as-is:
+            # d_seat/upright_err/width alone cannot tell a clean overhead approach
+            # from a drag, since both reduce d_seat equally well.
+            d_xy = jnp.linalg.norm(observation[:, 0:2], axis=-1)
+            clearance = observation[:, 2] + self.SEAT_OFF_Z_ABOVE_PLANK
+            far = 1.0 - jnp.exp(-(d_xy / self.FAR_TOL) ** 2)
+            drag = far * jnp.clip(self.CLEAR_REF - clearance, 0.0, self.CLEAR_REF)
+            features = jnp.stack([-d_seat, -upright_err, -d_ee_neck, width, -drag], axis=-1)
         else:
             features = observation
 

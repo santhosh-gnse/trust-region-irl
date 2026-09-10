@@ -20,6 +20,7 @@ from trust_region_irl.algorithms.trirl_ppo_fb.flax_full_jit.general_properties i
 from trust_region_irl.algorithms.trirl_ppo_fb.flax_full_jit.policy import get_policy
 from trust_region_irl.algorithms.trirl_ppo_fb.flax_full_jit.critic import get_critic
 from trust_region_irl.algorithms.trirl_ppo_fb.flax_full_jit.discriminator import get_discriminator
+from trust_region_irl.algorithms.trirl_ppo_fb.flax_full_jit import mixed_action_distribution as mad
 from trust_region_irl.algorithms.data_utils import prepare_expert_data, expert_data_spec
 
 rlx_logger = logging.getLogger("rl_x")
@@ -114,6 +115,16 @@ class TRIRL_PPO:
         reset_key = jax.random.split(reset_key, 1)
 
         self.policy, self.get_processed_action = get_policy(self.config, self.train_env)
+        # Opt-in: an env can declare certain action dims as genuinely discrete
+        # (e.g. a latched gripper button) rather than continuous-Gaussian. See
+        # mixed_action_distribution.py. Default is empty -> every formula below
+        # reduces to EXACTLY the original Gaussian-only behavior (verified in
+        # scripts/verify_mixed_action_distribution.py), so this is a no-op for
+        # every environment that doesn't declare it.
+        discrete_dims = getattr(self.train_env, "discrete_action_dims", ())
+        self.discrete_mask = jnp.zeros(self.dim, dtype=bool)
+        if discrete_dims:
+            self.discrete_mask = self.discrete_mask.at[jnp.array(discrete_dims, dtype=jnp.int32)].set(True)
         self.critic = get_critic(self.config, self.train_env)
         self.discriminator = get_discriminator(config, self.train_env, reward_type=self.reward_type)
 
@@ -210,9 +221,8 @@ class TRIRL_PPO:
                         key, subkey = jax.random.split(key)
                         observation = env_state.next_observation
                         action_mean, action_logstd = self.policy.apply(policy_state.params, observation)
-                        action_std = jnp.exp(action_logstd)
-                        action = action_mean + action_std * jax.random.normal(subkey, shape=action_mean.shape)
-                        log_prob = (-0.5 * ((action - action_mean) / action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - action_logstd).sum(1)
+                        action = mad.sample(action_mean, action_logstd, subkey, self.discrete_mask)
+                        log_prob = mad.log_prob(action, action_mean, action_logstd, self.discrete_mask).sum(1)
                         processed_action = self.get_processed_action(action)
                         value = self.critic.apply(critic_state.params, observation).squeeze(-1)
                         action_logstd = jnp.repeat(action_logstd[None, :], action_mean.shape[0], axis=0)
@@ -464,9 +474,9 @@ class TRIRL_PPO:
                         # Policy loss
                         action_mean, action_logstd = self.policy.apply(policy_params, state_b)
                         action_std = jnp.exp(action_logstd)
-                        new_log_prob = -0.5 * ((action_b - action_mean) / action_std) ** 2 - 0.5 * jnp.log(2.0 * jnp.pi) - action_logstd
+                        new_log_prob = mad.log_prob(action_b, action_mean, action_logstd, self.discrete_mask)
                         new_log_prob = new_log_prob.sum(1)
-                        entropy = action_logstd + 0.5 * jnp.log(2.0 * jnp.pi * jnp.e)
+                        entropy = mad.entropy(action_mean, action_logstd, self.discrete_mask)
                         entropy = self.entropy_coef * entropy # scaling to reduce critic loss
 
                         logratio = new_log_prob - log_prob_b
@@ -486,10 +496,8 @@ class TRIRL_PPO:
                         # Trust Region Loss
                         # Analytical KL (across all samples)
                         old_logstd_b = jnp.expand_dims(old_logstd_b, 0) # shape (1, as_shape)
-                        old_action_std = jnp.exp(old_logstd_b)
-                        tr_loss_maha = 0.5 * jnp.sum(((old_mean_b - action_mean)/old_action_std) ** 2, axis=1)
-                        tr_loss_cov_part = 0.5 * jnp.sum(2.0 * (jnp.log(old_action_std) - jnp.log(action_std)) + (action_std/old_action_std)**2 - 1.0, axis=1)
-                        trust_region_loss = tr_loss_maha + tr_loss_cov_part
+                        trust_region_loss = jnp.sum(
+                            mad.kl(old_mean_b, old_logstd_b, action_mean, action_logstd, self.discrete_mask), axis=1)
 
                         # Combine losses
                         loss = pg_loss - self.entropy_coef * entropy_loss + self.critic_coef * critic_loss + eta * trust_region_loss
