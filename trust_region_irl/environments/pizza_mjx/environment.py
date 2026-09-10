@@ -112,6 +112,25 @@ class PizzaSpread:
     WANDER_MARGIN = 0.025      # m beyond PIZZA_R (real-data max excess is 14 mm)
     WANDER_HOLD_S = 0.5        # s continuously beyond that margin before truncating
 
+    # Imitation-quality logging metric, from the TRIRL paper's per-step score
+    # exp(-(v_pi - v_piE)^2), adapted to joint POSITIONS here (as suggested) since
+    # this task has no natural single "upper-body velocity" scalar. It needs a
+    # per-step expert reference to compare against, which this task doesn't have
+    # for free -- there is no single demonstrated clip, and episodes vary in
+    # length (179-396 steps) -- so REF_QPOS is a reference trajectory pooled from
+    # all 117 tempo=1.0 demonstrations, binned by fractional PROGRESS through the
+    # episode (100 bins) rather than raw step index, which is what makes pooling
+    # variable-length episodes meaningful at all. Sanity check: scoring each real
+    # demo against this pooled reference gives 0.98 +- 0.008 (95% range 0.95-0.99)
+    # -- a real ceiling for "perfect imitation" that is comfortably below 1.0
+    # because it is pooled/averaged, not because of any noise in the metric itself.
+    # EXPECTED_LENGTH (median real episode length) turns the policy's own elapsed
+    # step count into that same progress fraction, so a policy that is much
+    # faster or slower than the expert's typical pace gets compared against the
+    # WRONG point in the reference and is correctly penalised for it.
+    EXPECTED_LENGTH = 256       # steps; median real (tempo=1.0) episode length
+    REF_N_BINS = 100
+
     # coverage grid -- LOGGING ONLY, never a reward feature (see get_features)
     N_RAD, N_ANG = 8, 24       # 192 cells; ~18 mm radial x ~38 mm arc at the rim,
                                # comparable to the 30 mm tool footprint
@@ -154,6 +173,8 @@ class PizzaSpread:
         self.home_pos = jnp.array(_d.xpos[self.ee_body_id], dtype=jnp.float32)
         self.pizza_off = jnp.array(self.PIZZA_OFF, dtype=jnp.float32)
         self.cell_centres = jnp.array(self._cell_centres(), dtype=jnp.float32)
+        ref_path = Path(__file__).resolve().parent / "data" / "expert_joint_reference.npy"
+        self.ref_qpos = jnp.array(np.load(ref_path), dtype=jnp.float32)   # (REF_N_BINS, 7)
 
         obs_dim = 17 + (1 if obs_mode == "coverage" else 0)
         self.single_action_space = BoxSpace(
@@ -251,6 +272,17 @@ class PizzaSpread:
         off_pizza = jnp.maximum(r - self.PIZZA_R, 0.0)
         return r, coverage, off_pizza
 
+    def _imitation_score(self, qpos, episode_length):
+        """exp(-mean squared joint-position error) against the pooled expert
+        reference at this episode's progress fraction. Logging only -- never a
+        reward feature, never a training signal, per the same reasoning as
+        coverage (real deployment has no ground truth to score this against)."""
+        progress = jnp.clip(episode_length / (self.EXPECTED_LENGTH - 1), 0.0, 1.0)
+        bi = jnp.clip((progress * self.REF_N_BINS).astype(jnp.int32),
+                      0, self.REF_N_BINS - 1)
+        ref = self.ref_qpos[bi]
+        return jnp.exp(-jnp.mean(jnp.square(qpos - ref)))
+
     def get_reward(self, data, action, visited):
         r, coverage, off_pizza = self._terms(data, visited)
         is_success = (coverage >= self.success_threshold).astype(jnp.float32)
@@ -286,16 +318,19 @@ class PizzaSpread:
             "rollout/off_pizza_frac": 0.0,
             "rollout/diverged": 0.0,
             "rollout/wandered_off": 0.0,
+            "rollout/imitation_score": 0.0,
             "env_info/coverage": 0.0,
             "env_info/radius": 0.0,
             "env_info/off_pizza": 0.0,
             "env_info/is_success": 0.0,
             "env_info/task_err": 0.0,
             "env_info/diverged": 0.0,
+            "env_info/imitation_score": 0.0,
         }
         store = {"episode_return": 0.0, "episode_length": 0,
                  "visited": jnp.zeros(self.N_RAD * self.N_ANG, dtype=jnp.float32),
-                 "max_radius": 0.0, "off_steps": 0.0, "wander_steps": 0.0}
+                 "max_radius": 0.0, "off_steps": 0.0, "wander_steps": 0.0,
+                 "imitation_score_sum": 0.0}
         state = State(data, next_observation, next_observation, 0.0, False, False,
                       info, store, key)
         return self._reset(state)
@@ -320,12 +355,14 @@ class PizzaSpread:
         info["env_info/coverage"] = cov0
         info["env_info/off_pizza"] = off0
         info["env_info/task_err"] = 1.0 - cov0
+        info["env_info/imitation_score"] = self._imitation_score(
+            data.qpos[self.arm_qadr], jnp.float32(0.0))
         return state.replace(
             data=data, next_observation=obs, actual_next_observation=obs,
             reward=0.0, terminated=False, truncated=False, info=info,
             info_episode_store={"episode_return": 0.0, "episode_length": 0,
                                 "visited": visited, "max_radius": 0.0, "off_steps": 0.0,
-                                "wander_steps": 0.0},
+                                "wander_steps": 0.0, "imitation_score_sum": 0.0},
         )
 
     @partial(jax.vmap, in_axes=(None, 0, 0))
@@ -356,6 +393,11 @@ class PizzaSpread:
         store["max_radius"] = jnp.maximum(store["max_radius"], r)
         store["off_steps"] += (r_info["env_info/off_pizza"] > 0.0).astype(jnp.float32)
 
+        imitation_score = self._imitation_score(
+            data.qpos[self.arm_qadr], store["episode_length"].astype(jnp.float32))
+        r_info["env_info/imitation_score"] = imitation_score
+        store["imitation_score_sum"] += imitation_score
+
         terminated = r_info["env_info/is_success"] > 0.5
         diverged = jnp.any(jnp.isnan(data.qpos)) | jnp.any(jnp.isnan(data.qvel))
 
@@ -384,6 +426,9 @@ class PizzaSpread:
             state.info["rollout/off_pizza_frac"])
         state.info["rollout/diverged"] = jnp.where(done, diverged.astype(jnp.float32), state.info["rollout/diverged"])
         state.info["rollout/wandered_off"] = jnp.where(done, wandered_off.astype(jnp.float32), state.info["rollout/wandered_off"])
+        state.info["rollout/imitation_score"] = jnp.where(
+            done, store["imitation_score_sum"] / jnp.maximum(store["episode_length"], 1),
+            state.info["rollout/imitation_score"])
 
         def when_done(_):
             s = self._reset(state)
