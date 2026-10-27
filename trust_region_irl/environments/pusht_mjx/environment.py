@@ -94,12 +94,19 @@ class PushT:
                           # (~0.57 m table; 1.0 catches off-table blocks early)
 
     def __init__(self, render, horizon=250, reward_style="dense",
-                 success_threshold=0.05, feature_fn="base", block_type="free"):
+                 success_threshold=0.05, feature_fn="base", block_type="free", feature_encoder=""):
         self.horizon = horizon
         self.reward_style = reward_style
         self.success_threshold = success_threshold
         self.feature_fn = feature_fn
         self.block_type = block_type
+        # feature_fn="learned" (same as pizza_mjx): a frozen self-supervised encoder of the raw state
+        self.learned_features = None
+        if feature_fn == "learned":
+            if not feature_encoder:
+                raise ValueError("feature_fn='learned' needs environment.feature_encoder=<encoder.pkl>")
+            from trust_region_irl.representation.encoder import FrozenFeatures
+            self.learned_features = FrozenFeatures(feature_encoder)
 
         # block physics: free (6-DOF free joint) or 3dof (planar slide/slide/hinge, matches
         # the 3dof MTP data collection). Only the scene + initial block qpos differ; obs,
@@ -164,10 +171,15 @@ class PushT:
             feature_dim = 7  # [-pos_err, -orient_err, -ee_block, pos_bump_tight, pos_bump_wide, ori_bump, goal_bump]
         elif self.feature_fn == "rbf":
             feature_dim = 4  # [pos_bump_tight, pos_bump_wide, ori_bump, goal_bump] (RBF bumps only)
+        elif self.feature_fn == "learned":
+            feature_dim = self.learned_features.d
         else:
             feature_dim = self.single_observation_space.shape[0]
         self.single_features_shape = BoxSpace(
             low=-jnp.inf, high=jnp.inf, shape=(feature_dim,), dtype=jnp.float32)
+        _f = self.feature_from_transition(jnp.zeros((1, 24)), jnp.zeros((1, 2)))
+        if _f.shape[-1] != feature_dim:   # catch a declared/computed feature-size mismatch at construction
+            raise ValueError(f"feature_fn {feature_fn!r}: declared {feature_dim} features, computes {_f.shape[-1]}")
 
         self.viewer = None
         if render:
@@ -447,7 +459,9 @@ class PushT:
             observation = observation[None, :]
             action = action[None, :]
 
-        if self.feature_fn == "base_rbf":
+        if self.feature_fn == "learned":
+            features = self.learned_features(observation)
+        elif self.feature_fn == "base_rbf":
             # Engineered features that make matching the expert REQUIRE reaching the
             # goal (not just matching its average distance). The broad "-err" terms
             # pull toward the goal; the goal-centered Gaussian "bumps" are peaked at

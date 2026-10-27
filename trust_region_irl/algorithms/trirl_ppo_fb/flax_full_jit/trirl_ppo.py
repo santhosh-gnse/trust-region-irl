@@ -133,8 +133,13 @@ class TRIRL_PPO:
             return self.learning_rate * fraction
 
         def linear_schedule_disc(count):
-            fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs_disc)) / ((self.nr_updates * self.nr_epochs) / self.nr_epochs_disc)
-            return self.learning_rate * fraction
+            # count // (minibatches * disc epochs) is already the update index, so divide
+            # by nr_updates alone (the old nr_epochs/nr_epochs_disc factor drove the lr
+            # negative -> gradient ascent when the epoch counts differed); clamp at 0 and
+            # anneal the discriminator's own lr, not the policy's.
+            fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs_disc)) / self.nr_updates
+            fraction = jnp.maximum(0.0, fraction)
+            return self.learning_rate_disc * fraction
 
         learning_rate = linear_schedule if self.anneal_learning_rate else self.learning_rate
         learning_rate_disc = linear_schedule_disc if self.anneal_learning_rate else self.learning_rate_disc

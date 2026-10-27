@@ -12,6 +12,7 @@ def get_config(environment_name):
     config.device = "gpu"
     config.copy_train_env_for_eval = True
     config.feature_fn = "base"  # base | base_rbf | spread | state_action
+    config.feature_encoder = ""     # feature_fn=learned: path to a frozen SSL encoder.pkl
     config.obs_mode = "plain"   # plain (17-D, matches the dataset) | coverage (18-D)
     # 500 covers the longest retimed demonstration (454 steps at tempo 0.85)
     config.horizon = 500

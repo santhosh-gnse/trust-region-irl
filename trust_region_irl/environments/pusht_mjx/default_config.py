@@ -11,7 +11,8 @@ def get_config(environment_name):
     config.render = False
     config.device = "gpu"
     config.copy_train_env_for_eval = True
-    config.feature_fn = "base"  # IRL feature basis: base | base_rbf | rbf | state_action
+    config.feature_fn = "base"  # IRL feature basis: base | base_rbf | rbf | state_action | learned
+    config.feature_encoder = ""     # feature_fn=learned: path to a frozen SSL encoder.pkl
     config.block_type = "free"  # block physics: free (6-DOF) | 3dof (planar slide/slide/hinge)
 
     return config

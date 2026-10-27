@@ -139,8 +139,13 @@ class TRIRL_TRPL:
             return self.learning_rate * fraction
 
         def linear_schedule_disc(count):
-            fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs_disc)) / ((self.nr_updates * self.nr_epochs) / self.nr_epochs_disc)
-            return self.learning_rate * fraction
+            # count // (minibatches * disc epochs) is already the update index, so divide
+            # by nr_updates alone (the old nr_epochs/nr_epochs_disc factor drove the lr
+            # negative -> gradient ascent when the epoch counts differed); clamp at 0 and
+            # anneal the discriminator's own lr, not the policy's.
+            fraction = 1.0 - (count // (self.nr_minibatches * self.nr_epochs_disc)) / self.nr_updates
+            fraction = jnp.maximum(0.0, fraction)
+            return self.learning_rate_disc * fraction
 
         learning_rate = linear_schedule if self.anneal_learning_rate else self.learning_rate
         learning_rate_disc = linear_schedule_disc if self.anneal_learning_rate else self.learning_rate_disc
@@ -305,20 +310,17 @@ class TRIRL_TRPL:
 
                     # Expert batch
                     key, shuffle_key = jax.random.split(key)
-                    perm = jax.random.permutation(shuffle_key, expert_states.shape[0])
-                    expert_states = expert_states[perm]
-                    expert_actions = expert_actions[perm]
-                    batch_expert_states = expert_states[:self.batch_size]
-                    batch_expert_actions = expert_actions[:self.batch_size]
+                    # sample with replacement so the batch has batch_size rows even if the expert data is smaller
+                    expert_idx = jax.random.randint(shuffle_key, (self.batch_size,), 0, expert_states.shape[0])
+                    batch_expert_states = expert_states[expert_idx]
+                    batch_expert_actions = expert_actions[expert_idx]
                     expert_labels = jnp.ones((self.batch_size, 1), dtype=jnp.float32)
                     rollout_labels = jnp.zeros((self.batch_size, 1), dtype=jnp.float32)
 
                     batch_next_states = next_states.reshape((-1,) + self.os_shape)
                     batch_absorbing = terminations.reshape(-1)
-                    expert_next_states = expert_next_states[perm]
-                    expert_absorbing = expert_absorbing[perm]
-                    batch_expert_next_states = expert_next_states[:self.batch_size]
-                    batch_expert_absorbing = expert_absorbing[:self.batch_size]
+                    batch_expert_next_states = expert_next_states[expert_idx]
+                    batch_expert_absorbing = expert_absorbing[expert_idx]
 
                     vmap_trirl_loss_fn = jax.vmap(trirl_loss_fn, in_axes=(None, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), out_axes=0)
                     safe_mean = lambda x: jnp.mean(x) if x is not None else x

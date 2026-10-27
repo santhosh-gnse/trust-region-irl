@@ -136,11 +136,18 @@ class PizzaSpread:
                                # comparable to the 30 mm tool footprint
 
     def __init__(self, render, horizon=500, reward_style="dense",
-                 success_threshold=0.90, feature_fn="base", obs_mode="plain"):
+                 success_threshold=0.90, feature_fn="base", obs_mode="plain", feature_encoder=""):
         self.horizon = horizon
         self.reward_style = reward_style
         self.success_threshold = success_threshold      # coverage fraction
         self.feature_fn = feature_fn
+        # feature_fn="learned": a frozen self-supervised encoder of the raw 17-D state (no coverage)
+        self.learned_features = None
+        if feature_fn == "learned":
+            from trust_region_irl.representation.encoder import FrozenFeatures
+            if not feature_encoder:
+                raise ValueError("feature_fn='learned' needs environment.feature_encoder=<encoder.pkl>")
+            self.learned_features = FrozenFeatures(feature_encoder)
         self.obs_mode = obs_mode                        # "plain" (17) | "coverage" (18)
 
         xml = (Path(__file__).resolve().parent / "data" / "scene_mjx_pizza.xml").as_posix()
@@ -189,6 +196,8 @@ class PizzaSpread:
             fd = 6
         elif feature_fn == "spread":
             fd = 8
+        elif feature_fn == "learned":
+            fd = self.learned_features.d   # frozen SSL encoder output; reward stays linear in it
         else:
             fd = obs_dim
         self.single_features_shape = BoxSpace(
@@ -492,6 +501,8 @@ class PizzaSpread:
             features = jnp.concatenate([observation, action], axis=-1)
         elif self.feature_fn == "base":
             features = jnp.stack([r_norm, -off, -speed], axis=-1)
+        elif self.feature_fn == "learned":
+            features = self.learned_features(observation)
         else:
             features = observation
 
